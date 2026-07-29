@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 助手 - Spring AI</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: #f0f2f5;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: #fff;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+        .header .icon { font-size: 28px; }
+        .header h1 { font-size: 18px; font-weight: 600; }
+        .header .badge {
+            margin-left: 8px;
+            font-size: 11px;
+            background: rgba(255,255,255,0.25);
+            padding: 2px 8px;
+            border-radius: 8px;
+        }
+        .header .nav-link {
+            margin-left: 16px;
+            font-size: 14px;
+            color: rgba(255,255,255,0.9);
+            text-decoration: none;
+            padding: 4px 12px;
+            border-radius: 8px;
+            transition: background 0.2s;
+        }
+        .header .nav-link:hover {
+            background: rgba(255,255,255,0.15);
+        }
+        .header .status {
+            margin-left: auto;
+            font-size: 12px;
+            background: rgba(255,255,255,0.2);
+            padding: 4px 12px;
+            border-radius: 12px;
+        }
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .message {
+            max-width: 75%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.6;
+            word-break: break-word;
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .message.user {
+            align-self: flex-end;
+            background: #6366f1;
+            color: #fff;
+            border-bottom-right-radius: 4px;
+        }
+        .message.bot {
+            align-self: flex-start;
+            background: #fff;
+            color: #333;
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        }
+        .message.bot .sources {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #eee;
+            font-size: 12px;
+            color: #888;
+        }
+        .message.bot .sources summary {
+            cursor: pointer;
+            color: #6366f1;
+        }
+        .message.bot .loading {
+            display: flex;
+            gap: 6px;
+            padding: 4px 0;
+        }
+        .message.bot .loading span {
+            width: 8px; height: 8px;
+            background: #ccc;
+            border-radius: 50%;
+            animation: bounce 1.2s infinite;
+        }
+        .message.bot .loading span:nth-child(2) { animation-delay: 0.2s; }
+        .message.bot .loading span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes bounce {
+            0%, 80%, 100% { transform: translateY(0); }
+            40% { transform: translateY(-8px); }
+        }
+        .input-area {
+            background: #fff;
+            padding: 16px 20px;
+            display: flex;
+            gap: 12px;
+            border-top: 1px solid #e8e8e8;
+        }
+        .input-area .search-options {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding-right: 16px;
+            border-right: 1px solid #eee;
+            flex-wrap: wrap;
+            max-width: 420px;
+        }
+        .input-area .search-options label {
+            font-size: 12px;
+            color: #666;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .input-area .search-options input[type="checkbox"] {
+            width: 14px;
+            height: 14px;
+        }
+        .input-area .search-options input[type="number"] {
+            width: 60px;
+            padding: 6px 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .mode-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .mode-rag { background: #ede9fe; color: #6366f1; }
+        .mode-agent { background: #fef3c7; color: #d97706; }
+        .quick-prompt {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            font-size: 12px;
+            background: #f3f4f6;
+            color: #4b5563;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .quick-prompt:hover { background: #e5e7eb; }
+        .quick-prompts {
+            padding: 0 20px 8px;
+            background: #fff;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .input-area input[type="text"] {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            transition: border 0.2s;
+        }
+        .input-area input[type="text"]:focus { border-color: #6366f1; }
+        .input-area button {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+            white-space: nowrap;
+        }
+        .input-area button:hover { opacity: 0.9; }
+        .input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <span class="icon">🤖</span>
+        <h1>AI 助手</h1>
+        <span class="badge">Spring AI</span>
+        <a href="/docs.html" class="nav-link">📁 知识库</a>
+        <span class="status" id="status">就绪</span>
+    </div>
+
+    <div class="chat-container" id="chat">
+        <div class="message bot">
+            👋 你好！我是智能运维 AI 助手。我可以帮你：<br><br>
+            <b>📚 知识库问答</b>：查询告警规则、操作手册、常见问题<br>
+            <b>🔧 Agent 工具</b>：设备清单查询、设备详情、能耗数据分析<br><br>
+            在下方选择模式，开启对话吧！
+        </div>
+    </div>
+
+    <div class="quick-prompts" id="quickPrompts">
+        <span class="quick-prompt" onclick="fillInput('列出所有设备')">📋 设备清单</span>
+        <span class="quick-prompt" onclick="fillInput('wzh_device009 详细信息')">ℹ️ 设备详情</span>
+        <span class="quick-prompt" onclick="fillInput('wzh_device009 近30天能耗')">📊 近月能耗</span>
+        <span class="quick-prompt" onclick="fillInput('wzh_device009 近半年能耗')">📈 半年能耗</span>
+        <span class="quick-prompt" onclick="fillInput('Alert和Alarm Event有什么区别？')">❓ 知识库问答</span>
+    </div>
+
+    <div class="input-area">
+        <div class="search-options">
+            <label>
+                <input type="checkbox" id="agentMode" checked onchange="updateModeBadge()">
+                Agent 模式
+            </label>
+            <label>
+                <input type="checkbox" id="hybridSearch" checked>
+                混合检索
+            </label>
+            <label>
+                Top-K:
+                <input type="number" id="topK" value="3" min="1" max="10">
+            </label>
+            <span class="mode-badge mode-agent" id="modeBadge">AGENT</span>
+        </div>
+        <input type="text" id="question" placeholder="输入你的问题，例如：wzh_device009 近30天能耗是多少？" autofocus>
+        <button id="sendBtn" onclick="send()">发送</button>
+    </div>
+
+    <script>
+        const chatEl = document.getElementById('chat');
+        const inputEl = document.getElementById('question');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusEl = document.getElementById('status');
+        const hybridSearchEl = document.getElementById('hybridSearch');
+        const topKEl = document.getElementById('topK');
+        const agentModeEl = document.getElementById('agentMode');
+        const modeBadgeEl = document.getElementById('modeBadge');
+
+        function generateSessionId() {
+            let sid = sessionStorage.getItem('sessionId');
+            if (!sid) {
+                sid = 'session-' + Date.now();
+                sessionStorage.setItem('sessionId', sid);
+            }
+            return sid;
+        }
+
+        function updateModeBadge() {
+            if (agentModeEl.checked) {
+                modeBadgeEl.textContent = 'AGENT';
+                modeBadgeEl.className = 'mode-badge mode-agent';
+            } else {
+                modeBadgeEl.textContent = 'RAG';
+                modeBadgeEl.className = 'mode-badge mode-rag';
+            }
+        }
+
+        function fillInput(text) {
+            inputEl.value = text;
+            inputEl.focus();
+        }
+
+        inputEl.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                send();
+            }
+        });
+
+        function renderMarkdown(text) {
+            let html = text;
+            html = html.replace(/^### (.+)$/gm, '<h4 style="margin: 10px 0 6px; font-size: 15px;">$1</h4>');
+            html = html.replace(/^## (.+)$/gm, '<h3 style="margin: 12px 0 8px; font-size: 16px;">$1</h3>');
+            html = html.replace(/^# (.+)$/gm, '<h2 style="margin: 14px 0 10px; font-size: 18px;">$1</h2>');
+            html = html.replace(/\*\*(.+?)\*\*/g, '<strong style="font-weight: 600;">$1</strong>');
+            html = html.replace(/`([^`]+?)`/g, '<code style="background:#f5f5f5;padding:1px 6px;border-radius:4px;font-size:12px;">$1</code>');
+            html = html.replace(/^- (.+)$/gm, '• $1');
+            const parseTable = (section) => {
+                const lines = section.trim().split('\n').filter(l => l.trim());
+                if (lines.length < 2) return section;
+                const sepIdx = lines.findIndex(l => /^[\s|:\-]+$/.test(l));
+                if (sepIdx < 1) return section;
+                const header = lines[sepIdx - 1].split('|').map(c => c.trim()).filter(c => c);
+                const rows = lines.slice(sepIdx + 1).map(l => l.split('|').map(c => c.trim()).filter(c => c));
+                if (header.length === 0) return section;
+                let tbl = '<table style="border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px;">';
+                tbl += '<thead><tr style="background:#f5f5f5;">';
+                header.forEach(h => tbl += `<th style="border:1px solid #e5e7eb;padding:6px 10px;text-align:left;">${h}</th>`);
+                tbl += '</tr></thead><tbody>';
+                rows.forEach(r => {
+                    if (r.length !== header.length) return;
+                    tbl += '<tr>';
+                    r.forEach((c, i) => {
+                        const align = /^[\d.]+$/.test(c) && i > 0 ? 'right' : 'left';
+                        tbl += `<td style="border:1px solid #e5e7eb;padding:6px 10px;text-align:${align}">${c}</td>`;
+                    });
+                    tbl += '</tr>';
+                });
+                tbl += '</tbody></table>';
+                return tbl;
+            };
+            const parts = html.split(/\n(?=\|)/);
+            html = parts.map(p => p.startsWith('|') ? parseTable(p) : p).join('\n');
+            html = html.replace(/\n/g, '<br>');
+            html = html.replace(/^```(\w+)?\n([\s\S]*?)```$/gm, '<pre style="background:#262626;color:#e5e5e5;padding:10px;border-radius:6px;overflow-x:auto;font-size:12px;"><code>$2</code></pre>');
+            return html;
+        }
+
+        function appendMessage(text, cls) {
+            const div = document.createElement('div');
+            div.className = `message ${cls}`;
+            div.innerHTML = text;
+            chatEl.appendChild(div);
+            chatEl.scrollTop = chatEl.scrollHeight;
+            return div;
+        }
+
+        async function send() {
+            const q = inputEl.value.trim();
+            if (!q) return;
+
+            appendMessage(q, 'user');
+            inputEl.value = '';
+            sendBtn.disabled = true;
+
+            const mode = agentModeEl.checked ? 'Agent 执行中' : '思考中';
+            statusEl.textContent = mode + '...';
+
+            const loadingEl = appendMessage(
+                '<div class="loading"><span></span><span></span><span></span></div>', 'bot'
+            );
+
+            try {
+                const sessionId = generateSessionId();
+                const endpoint = agentModeEl.checked ? '/ai/agent-chat' : '/ai/chat';
+                const payload = {
+                    question: q,
+                    enableHybridSearch: hybridSearchEl.checked,
+                    topK: parseInt(topKEl.value),
+                    sessionId: sessionId
+                };
+
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await res.json();
+                chatEl.removeChild(loadingEl);
+
+                if (res.ok) {
+                    let html = renderMarkdown(data.answer || '');
+                    if (data.sources && data.sources.length > 0) {
+                        html += '<div class="sources"><details><summary>📎 参考来源 (' + data.sources.length + ')</summary>';
+                        data.sources.forEach((s, i) => {
+                            const score = s.score ? ' [相似度: ' + (s.score * 100).toFixed(1) + '%]' : '';
+                            html += `<br><b>[${i + 1}]</b>${score} ${s.content}`;
+                        });
+                        html += '</details></div>';
+                    }
+                    appendMessage(html, 'bot');
+                } else {
+                    appendMessage('❌ 请求失败: ' + (data.detail || data.message || '未知错误'), 'bot');
+                }
+            } catch (err) {
+                chatEl.removeChild(loadingEl);
+                appendMessage('❌ 网络错误: ' + err.message, 'bot');
+            }
+
+            sendBtn.disabled = false;
+            statusEl.textContent = '就绪';
+            inputEl.focus();
+        }
+    </script>
+</body>
+</html>

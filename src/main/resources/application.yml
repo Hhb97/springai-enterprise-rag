@@ -1,0 +1,76 @@
+server:
+  port: 8900
+
+spring:
+  application:
+    name: rag-assistant
+
+  datasource:
+    url: jdbc:h2:file:./data/ragdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  ai:
+    ollama:
+      base-url: http://192.168.221.130:11434
+      chat:
+        model: qwen2.5:1.5b
+        options:
+          temperature: 0.3
+          num-predict: 1024
+      embedding:
+        model: nomic-embed-text
+
+# RAG 配置
+rag:
+  top-k: 3
+  hybrid-search:
+    keyword-weight: 0.3
+    vector-weight: 0.7
+
+# 文件存储配置
+storage:
+  upload-dir: ./uploads
+
+# InfluxDB 1.x 配置
+influxdb:
+  url: http://192.168.221.130:8086
+  username: influxdb
+  password: 123456
+  database: acucloud-dev
+  retention-policy: autogen
+  timeout-seconds: 30
+
+# === Prompt 工程化配置（可热修改，无需改代码） ===
+prompt:
+  agent:
+    role: 你是智能运维助手，支持设备查询、能耗分析与知识库问答
+    max-history: 20
+  rag:
+    role: 你是专业的后端管理平台 AI 助手
+
+# === LLM 模块化配置（供 DomainServiceConfig 读取） ===
+# llm:
+#   provider: ollama        # ollama / openai / zhipu
+#   model: qwen2.5:1.5b
+#   embedding-model: nomic-embed-text
+#   temperature: 0.3
+#   max-tokens: 1024
+
+# === 横切关注点（后续可启用） ===
+# resilience4j.circuitbreaker: ...  # 熔断降级
+# management.endpoints.web.exposure.include: health,info,metrics,prometheus

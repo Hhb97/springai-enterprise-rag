@@ -1,0 +1,70 @@
+package com.example.ragassitant.domain.service;
+
+import org.springframework.beans.factory.annotation.Value;
+
+public class PromptBuilder {
+
+    @Value("${prompt.agent.role:你是智能运维助手}")
+    private String agentRole;
+
+    @Value("${prompt.rag.role:你是专业的后端管理平台 AI 助手}")
+    private String ragRole;
+
+    @Value("${prompt.agent.max-history:20}")
+    private int maxHistory;
+
+    public String buildAgentSystemPrompt() {
+        return """
+                %s，回答必须基于真实工具返回的数据，禁止编造数字和表格。
+                
+                ## 什么时候需要调用工具
+                - 用户问"有什么设备"、"列出设备" → 调用 list_devices
+                - 用户按名称或部分编号找设备（没给完整SN）→ 调用 list_devices，把关键词当参数
+                - 用户提到"能耗"、"用电"但没给具体 SN 号 → 先调用 list_devices 帮用户找 SN，再查
+                
+                ## 什么时候不用调工具
+                大部分请求（带 mv-xxx / wzh_xxx SN 号的能耗查询）Java 层已经自动调了工具，你只需要总结结果即可。
+                
+                ## 工具清单
+                1. list_devices(keyword)   查设备清单，keyword 可选
+                2. get_device_detail(sn)   查单台设备详情，sn 必填
+                3. query_energy_half_year(sn)    查近半年每日能耗
+                4. query_energy_by_days(sn, days)  查最近 N 天每日能耗
+                5. query_energy_by_date_range(sn, startDate, endDate)   按具体日期范围查
+                6. aggregate_energy(sn, granularity)  按粒度聚合，granularity=week/month/quarter/year
+                
+                ## 输出格式
+                需要调工具时，只输出 JSON 数组，不要加任何解释：
+                [{"name":"工具名","arguments":{"参数":"值"}}]
+                
+                不需要调工具时，直接用中文自然语言回答，能耗数据整理成 Markdown 表格，不要编造数据。
+                """.formatted(agentRole);
+    }
+
+    public String buildRagSystemPrompt(String context) {
+        return """
+                %s。
+                请根据以下检索到的上下文内容回答用户的问题。
+                如果上下文中没有相关信息，请直接说"抱歉，我没有找到相关信息"，不要编造答案。
+
+                上下文：
+                %s
+                """.formatted(ragRole, context == null ? "" : context);
+    }
+
+    public String buildForcedToolExecutionFeedback(String toolResult) {
+        return "工具执行结果如下：\n```\n" + (toolResult == null ? "" : toolResult) + "\n```\n\n" +
+                "请基于以上工具执行结果，用中文自然语言回答用户的原始问题（不要再次调用工具，数据已经提供）。" +
+                " 表格格式要规范，单位标注清楚，不要编造虚假数据。";
+    }
+
+    public String buildToolResultsFeedback(String toolResults, boolean hasValidTool) {
+        if (hasValidTool) {
+            return "工具执行结果如下：\n" + toolResults +
+                    "\n\n请基于以上工具执行结果，用中文自然语言回答用户的原始问题（不需要再次列出原始JSON表格，整理成简洁友好的格式即可）。" +
+                    " 不要重复调用相同参数的工具。如果已经拿到能耗数据或设备清单，直接生成回答。";
+        }
+        return "工具执行时发现参数问题：\n" + toolResults +
+                "\n\n请按照提示修正参数，或者引导用户补充信息。";
+    }
+}

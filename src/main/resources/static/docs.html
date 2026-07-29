@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识库管理 - RAG AI 助手</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; min-height: 100vh; }
+        .header { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); color: #fff; padding: 16px 24px; box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3); }
+        .header .nav { display: flex; align-items: center; gap: 24px; }
+        .header a { color: rgba(255,255,255,0.9); text-decoration: none; font-size: 14px; }
+        .header a.active { color: #fff; font-weight: 600; }
+        .header h1 { font-size: 18px; font-weight: 600; }
+        .container { padding: 24px; max-width: 1200px; margin: 0 auto; }
+        .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); padding: 24px; margin-bottom: 24px; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #eee; }
+        .card-header h2 { font-size: 16px; font-weight: 600; color: #1a1a1a; }
+        .btn { padding: 8px 16px; border-radius: 6px; font-size: 14px; cursor: pointer; border: none; transition: all 0.2s; }
+        .btn-primary { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); color: #fff; }
+        .btn-primary:hover { opacity: 0.9; }
+        .btn-secondary { background: #f0f0f0; color: #666; }
+        .btn-secondary:hover { background: #e8e8e8; }
+        .btn-success { background: #22c55e; color: #fff; }
+        .btn-success:hover { background: #16a34a; }
+        .btn-warning { background: #f59e0b; color: #fff; }
+        .btn-warning:hover { background: #d97706; }
+        .btn-danger { background: #ef4444; color: #fff; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-sm { padding: 4px 10px; font-size: 12px; }
+        .table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        .table th, .table td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
+        .table th { background: #f8f9fa; font-weight: 600; color: #666; }
+        .table tr:hover { background: #fafafa; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+        .badge-draft { background: #fef3c7; color: #d97706; }
+        .badge-active { background: #dcfce7; color: #16a34a; }
+        .badge-archived { background: #f3f4f6; color: #6b7280; }
+        .badge-deleted { background: #fee2e2; color: #dc2626; }
+        .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 1000; }
+        .modal.active { display: flex; }
+        .modal-content { background: #fff; border-radius: 12px; padding: 24px; width: 90%; max-width: 500px; }
+        .modal-content h3 { margin-bottom: 20px; font-size: 16px; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 6px; font-size: 14px; color: #333; }
+        .form-group input, .form-group select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: #6366f1; }
+        .form-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+        .upload-area { border: 2px dashed #ddd; border-radius: 8px; padding: 32px; text-align: center; cursor: pointer; transition: all 0.2s; }
+        .upload-area:hover { border-color: #6366f1; background: #faf5ff; }
+        .upload-area input[type="file"] { display: none; }
+        .upload-area i { font-size: 32px; color: #999; margin-bottom: 8px; }
+        .empty-state { text-align: center; padding: 48px; color: #999; }
+        .empty-state i { font-size: 48px; margin-bottom: 16px; }
+        .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 24px; border-radius: 8px; color: #fff; font-size: 14px; z-index: 2000; animation: slideIn 0.3s; }
+        .toast-success { background: #22c55e; }
+        .toast-error { background: #ef4444; }
+        @keyframes slideIn { from { transform: translateX(100px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .search-box { padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; width: 200px; }
+        .search-box:focus { outline: none; border-color: #6366f1; }
+        .version-list { margin-top: 16px; border-left: 2px solid #eee; padding-left: 16px; }
+        .version-item { padding: 12px; background: #f8f9fa; border-radius: 6px; margin-bottom: 8px; position: relative; }
+        .version-item::before { content: ''; position: absolute; left: -9px; top: 16px; width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid #6366f1; }
+        .version-item.active::before { background: #6366f1; }
+        .version-item .version-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+        .version-item .version-num { font-weight: 600; color: #6366f1; }
+        .version-item .version-date { font-size: 12px; color: #999; }
+        .pagination { display: flex; justify-content: center; gap: 8px; margin-top: 20px; }
+        .pagination button { padding: 6px 12px; border: 1px solid #ddd; background: #fff; border-radius: 4px; cursor: pointer; }
+        .pagination button.active { background: #6366f1; color: #fff; border-color: #6366f1; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="nav">
+            <h1>📚 知识库管理</h1>
+            <div style="margin-left: auto; display: flex; gap: 24px;">
+                <a href="/">💬 聊天</a>
+                <a href="/docs.html" class="active">📁 知识库</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <div class="card-header">
+                <div style="display: flex; align-items: center; gap: 16px;">
+                    <h2>📁 文档列表</h2>
+                    <input type="text" id="searchInput" class="search-box" placeholder="搜索文档..." onkeyup="searchDocs()">
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn btn-primary" onclick="showUploadModal()">📤 上传文档</button>
+                    <button class="btn btn-secondary" onclick="ingestAll()">🔄 重建知识库</button>
+                </div>
+            </div>
+            
+            <div id="docList">
+                <div class="empty-state">
+                    <div>📭</div>
+                    <p>暂无文档，点击上方按钮上传</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="uploadModal">
+        <div class="modal-content">
+            <h3>📤 上传文档</h3>
+            <div class="upload-area" onclick="document.getElementById('fileInput').click()">
+                <div>📁</div>
+                <p>点击或拖拽文件到此处</p>
+                <p style="font-size: 12px; color: #999;">支持: .md, .pdf, .doc, .docx, .xls, .xlsx, .txt</p>
+                <input type="file" id="fileInput" accept=".md,.pdf,.doc,.docx,.xls,.xlsx,.txt" onchange="handleFileSelect()">
+            </div>
+            <div class="form-group">
+                <label>上传者</label>
+                <input type="text" id="createdBy" placeholder="输入上传者名称" value="admin">
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-secondary" onclick="closeModal('uploadModal')">取消</button>
+                <button class="btn btn-primary" id="uploadBtn" onclick="uploadDocument()">上传</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="versionModal">
+        <div class="modal-content">
+            <h3>📋 版本历史</h3>
+            <div id="versionContent" style="max-height: 400px; overflow-y: auto;">
+                <div class="empty-state">
+                    <p>暂无版本记录</p>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-secondary" onclick="closeModal('versionModal')">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="updateModal">
+        <div class="modal-content">
+            <h3>🔄 更新文档</h3>
+            <input type="hidden" id="updateDocumentId">
+            <div class="upload-area" onclick="document.getElementById('updateFileInput').click()">
+                <div>📁</div>
+                <p>点击或拖拽新文件到此处</p>
+                <input type="file" id="updateFileInput" accept=".md,.pdf,.doc,.docx,.xls,.xlsx,.txt" onchange="handleUpdateFileSelect()">
+            </div>
+            <div class="form-group">
+                <label>更新者</label>
+                <input type="text" id="updatedBy" placeholder="输入更新者名称" value="admin">
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-secondary" onclick="closeModal('updateModal')">取消</button>
+                <button class="btn btn-primary" onclick="updateDocument()">更新</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const docList = document.getElementById('docList');
+        let documents = [];
+
+        async function loadDocuments() {
+            try {
+                const res = await fetch('/api/docs/list');
+                documents = await res.json();
+                renderDocList(documents);
+            } catch (err) {
+                showToast('加载文档失败: ' + err.message, 'error');
+            }
+        }
+
+        function renderDocList(docs) {
+            if (docs.length === 0) {
+                docList.innerHTML = `
+                    <div class="empty-state">
+                        <div>📭</div>
+                        <p>暂无文档，点击上方按钮上传</p>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = `
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>文档名称</th>
+                            <th>最新版本</th>
+                            <th>状态</th>
+                            <th>创建时间</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            docs.forEach(doc => {
+                html += `
+                    <tr>
+                        <td style="max-width: 250px;">
+                            <div style="font-weight: 500;">${doc.fileName}</div>
+                            <div style="font-size: 12px; color: #999;">${doc.documentId}</div>
+                        </td>
+                        <td>v${doc.version}</td>
+                        <td><span class="badge badge-${doc.status.toLowerCase()}">${getStatusText(doc.status)}</span></td>
+                        <td>${formatDate(doc.createdAt)}</td>
+                        <td>
+                            <button class="btn btn-secondary btn-sm" onclick="showVersions('${doc.documentId}')">版本</button>
+                            <button class="btn btn-success btn-sm" onclick="showUpdateModal('${doc.documentId}')">更新</button>
+                            ${doc.status === 'DRAFT' ? `<button class="btn btn-warning btn-sm" onclick="publishDocument(${doc.id})">发布</button>` : ''}
+                            ${doc.status === 'ACTIVE' ? `<button class="btn btn-secondary btn-sm" onclick="archiveDocument(${doc.id})">归档</button>` : ''}
+                            ${doc.status !== 'ACTIVE' ? `<button class="btn btn-danger btn-sm" onclick="deleteVersion(${doc.id})">删版本</button>` : ''}
+                            <button class="btn btn-danger btn-sm" onclick="deleteDocument('${doc.documentId}')">删文档</button>
+                        </td>
+                    </tr>
+                `;
+            });
+
+            html += '</tbody></table>';
+            docList.innerHTML = html;
+        }
+
+        function getStatusText(status) {
+            const map = { 'DRAFT': '草稿', 'ACTIVE': '活跃', 'ARCHIVED': '归档', 'DELETED': '已删除' };
+            return map[status] || status;
+        }
+
+        function formatDate(dateStr) {
+            if (!dateStr) return '';
+            return new Date(dateStr).toLocaleString('zh-CN');
+        }
+
+        function searchDocs() {
+            const keyword = document.getElementById('searchInput').value.toLowerCase();
+            const filtered = documents.filter(doc => 
+                doc.fileName.toLowerCase().includes(keyword) ||
+                doc.documentId.toLowerCase().includes(keyword)
+            );
+            renderDocList(filtered);
+        }
+
+        function showUploadModal() {
+            document.getElementById('uploadModal').classList.add('active');
+            document.getElementById('fileInput').value = '';
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.remove('active');
+        }
+
+        function handleFileSelect() {
+            const file = document.getElementById('fileInput').files[0];
+            if (file) {
+                document.querySelector('.upload-area p:first-of-type').textContent = `已选择: ${file.name}`;
+            }
+        }
+
+        async function uploadDocument() {
+            const file = document.getElementById('fileInput').files[0];
+            if (!file) {
+                showToast('请选择要上传的文件', 'error');
+                return;
+            }
+
+            const createdBy = document.getElementById('createdBy').value;
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('createdBy', createdBy || 'admin');
+
+            try {
+                const res = await fetch('/api/docs/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (res.ok) {
+                    showToast('上传成功', 'success');
+                    closeModal('uploadModal');
+                    loadDocuments();
+                } else {
+                    const data = await res.json();
+                    showToast('上传失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (err) {
+                showToast('上传失败: ' + err.message, 'error');
+            }
+        }
+
+        async function showVersions(documentId) {
+            try {
+                const res = await fetch(`/api/docs/${documentId}/versions`);
+                const versions = await res.json();
+                renderVersionList(versions);
+                document.getElementById('versionModal').classList.add('active');
+            } catch (err) {
+                showToast('获取版本失败: ' + err.message, 'error');
+            }
+        }
+
+        function renderVersionList(versions) {
+            if (versions.length === 0) {
+                document.getElementById('versionContent').innerHTML = '<div class="empty-state"><p>暂无版本记录</p></div>';
+                return;
+            }
+
+            let html = '<div class="version-list">';
+            versions.forEach(v => {
+                html += `
+                    <div class="version-item ${v.status === 'ACTIVE' ? 'active' : ''}">
+                        <div class="version-header">
+                            <span class="version-num">v${v.version}</span>
+                            <span class="badge badge-${v.status.toLowerCase()}">${getStatusText(v.status)}</span>
+                        </div>
+                        <div class="version-date">${formatDate(v.createdAt)}</div>
+                        <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                            ${v.fileName} | ${v.chunkCount || 0} 个向量块
+                        </div>
+                        <div style="margin-top: 8px; display: flex; gap: 8px;">
+                            ${v.status === 'DRAFT' ? `<button class="btn btn-success btn-sm" onclick="publishDocument(${v.id})">发布</button>` : ''}
+                            ${v.status === 'ACTIVE' ? `<button class="btn btn-secondary btn-sm" onclick="addToKB(${v.id})">加入知识库</button>` : ''}
+                            ${v.status !== 'DELETED' ? `<button class="btn btn-danger btn-sm" onclick="deleteVersion(${v.id})">删除</button>` : ''}
+                        </div>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            document.getElementById('versionContent').innerHTML = html;
+        }
+
+        function showUpdateModal(documentId) {
+            document.getElementById('updateDocumentId').value = documentId;
+            document.getElementById('updateModal').classList.add('active');
+            document.getElementById('updateFileInput').value = '';
+        }
+
+        function handleUpdateFileSelect() {
+            const file = document.getElementById('updateFileInput').files[0];
+            if (file) {
+                document.querySelector('#updateModal .upload-area p:first-of-type').textContent = `已选择: ${file.name}`;
+            }
+        }
+
+        async function updateDocument() {
+            const file = document.getElementById('updateFileInput').files[0];
+            if (!file) {
+                showToast('请选择要上传的文件', 'error');
+                return;
+            }
+
+            const documentId = document.getElementById('updateDocumentId').value;
+            const updatedBy = document.getElementById('updatedBy').value;
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('createdBy', updatedBy || 'admin');
+
+            try {
+                const res = await fetch(`/api/docs/${documentId}/update`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (res.ok) {
+                    showToast('更新成功', 'success');
+                    closeModal('updateModal');
+                    loadDocuments();
+                } else {
+                    const data = await res.json();
+                    showToast('更新失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (err) {
+                showToast('更新失败: ' + err.message, 'error');
+            }
+        }
+
+        async function publishDocument(versionId) {
+            if (!confirm('确定要发布这个版本吗？发布后将替换当前活跃版本。')) return;
+
+            try {
+                const res = await fetch(`/api/docs/versions/${versionId}/publish`, {
+                    method: 'POST'
+                });
+
+                if (res.ok) {
+                    showToast('发布成功', 'success');
+                    loadDocuments();
+                    closeModal('versionModal');
+                } else {
+                    const data = await res.json();
+                    showToast('发布失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (err) {
+                showToast('发布失败: ' + err.message, 'error');
+            }
+        }
+
+        async function archiveDocument(versionId) {
+            if (!confirm('确定要归档这个版本吗？归档后将不再参与检索。')) return;
+
+            try {
+                const res = await fetch(`/api/docs/versions/${versionId}/archive`, {
+                    method: 'POST'
+                });
+
+                if (res.ok) {
+                    showToast('归档成功', 'success');
+                    loadDocuments();
+                } else {
+                    const data = await res.json();
+                    showToast('归档失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (err) {
+                showToast('归档失败: ' + err.message, 'error');
+            }
+        }
+
+        async function deleteDocument(documentId) {
+            if (!confirm('确定要删除这个文档吗？将删除所有版本。')) return;
+
+            try {
+                const res = await fetch(`/api/docs/${documentId}`, {
+                    method: 'DELETE'
+                });
+
+                if (res.ok) {
+                    showToast('删除成功', 'success');
+                    loadDocuments();
+                } else {
+                    const data = await res.json();
+                    showToast('删除失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (err) {
+                showToast('删除失败: ' + err.message, 'error');
+            }
+        }
+
+        async function deleteVersion(versionId) {
+            if (!confirm('确定要删除这个版本吗？')) return;
+
+            try {
+                const res = await fetch(`/api/docs/versions/${versionId}`, {
+                    method: 'DELETE'
+                });
+
+                if (res.ok) {
+                    showToast('版本删除成功', 'success');
+                    loadDocuments();
+                    closeModal('versionModal');
+                } else {
+                    const data = await res.json();
+                    showToast('删除失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (err) {
+                showToast('删除失败: ' + err.message, 'error');
+            }
+        }
+
+        async function ingestAll() {
+            if (!confirm('确定要重建知识库吗？这将清空现有向量库并重新加载所有活跃文档。')) return;
+
+            try {
+                const res = await fetch('/ai/ingest', {
+                    method: 'POST'
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    showToast(`知识库重建成功，共 ${data.count} 条向量`, 'success');
+                } else {
+                    const data = await res.json();
+                    showToast('重建失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (err) {
+                showToast('重建失败: ' + err.message, 'error');
+            }
+        }
+
+        async function addToKB(versionId) {
+            if (!confirm('确定要将这个版本加入知识库吗？将替换该文档的旧向量数据。')) return;
+
+            try {
+                const res = await fetch(`/ai/ingest/${versionId}`, {
+                    method: 'POST'
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    showToast(`成功入库 ${data.count} 条向量`, 'success');
+                } else {
+                    const data = await res.json();
+                    showToast('入库失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (err) {
+                showToast('入库失败: ' + err.message, 'error');
+            }
+        }
+
+        function showToast(message, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        document.addEventListener('DOMContentLoaded', loadDocuments);
+    </script>
+</body>
+</html>
