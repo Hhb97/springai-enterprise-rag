@@ -96,8 +96,9 @@ public class ChatController {
             if (sessionId == null || sessionId.isBlank()) {
                 sessionId = "session-" + System.currentTimeMillis();
             }
-            boolean useRag = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
-            AgentAppService.ChatResponse resp = agentAppService.chat(request.getQuestion(), sessionId, useRag);
+            boolean enableHybrid = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
+            AgentAppService.ChatResponse resp = agentAppService.chat(
+                    request.getQuestion(), sessionId, true, enableHybrid, request.getTopK());
 
             List<ChatResponseDTO.SourceDoc> sources = List.of();
             if (resp.sources != null) {

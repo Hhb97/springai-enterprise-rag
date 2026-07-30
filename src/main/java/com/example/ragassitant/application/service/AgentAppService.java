@@ -39,6 +39,7 @@ public class AgentAppService {
     private final ToolCallValidator toolCallValidator;
     private final PromptBuilder promptBuilder;
     private final AgentTraceStorePort traceStore;
+    private final RagAppService ragAppService;
     // Spring AI 2.0 官方 @Tool 注解的 Bean，ChatClient.tools(deviceTools) 自动识别 6 个工具
     private final DeviceTools deviceTools;
 
@@ -51,6 +52,7 @@ public class AgentAppService {
                            ToolCallValidator toolCallValidator,
                            PromptBuilder promptBuilder,
                            AgentTraceStorePort traceStore,
+                           RagAppService ragAppService,
                            DeviceTools deviceTools) {
         this.llmPort = llmPort;
         this.vectorStorePort = vectorStorePort;
@@ -61,12 +63,14 @@ public class AgentAppService {
         this.toolCallValidator = toolCallValidator;
         this.promptBuilder = promptBuilder;
         this.traceStore = traceStore;
+        this.ragAppService = ragAppService;
         this.deviceTools = deviceTools;
         log.info("✅ AgentAppService 初始化完成（Spring AI 2.0 官方自动 Tool Calling Agent，不再手写 for 循环）");
     }
 
-    public ChatResponse chat(String question, String sessionId, boolean useRag) {
-        log.info("🤖 Agent 处理问题: sessionId={}, useRag={}, question={}", sessionId, useRag, question);
+    public ChatResponse chat(String question, String sessionId, boolean useRag, boolean enableHybridSearch, Integer customTopK) {
+        log.info("🤖 Agent 处理问题: sessionId={}, useRag={}, hybrid={}, topK={}, question={}",
+                sessionId, useRag, enableHybridSearch, customTopK, question);
 
         List<MessageDTO> messages = new ArrayList<>();
         messages.add(new MessageDTO(Role.SYSTEM, promptBuilder.buildAgentSystemPrompt()));
@@ -144,7 +148,8 @@ public class AgentAppService {
         String userContent = question;
         if (useRag) {
             try {
-                List<DocumentChunk> docs = vectorStorePort.similaritySearch(question, 4);
+                int effectiveTopK = customTopK != null && customTopK > 0 ? customTopK : 4;
+                List<DocumentChunk> docs = ragAppService.retrieveDocuments(question, enableHybridSearch, effectiveTopK);
                 if (docs != null && !docs.isEmpty()) {
                     StringBuilder ragContext = new StringBuilder();
                     ragContext.append("## 知识库参考内容\n\n");
@@ -153,7 +158,8 @@ public class AgentAppService {
                         ragContext.append("**[").append(i + 1).append("]** ").append(doc.getText()).append("\n\n");
                         Object title = doc.getMetadata() == null ? null : doc.getMetadata().get("title");
                         Object fileName = doc.getMetadata() == null ? null : doc.getMetadata().get("fileName");
-                        Double score = doc.getScore();
+                        Object hybridScore = doc.getMetadata() == null ? null : doc.getMetadata().get("hybridScore");
+                        Double score = hybridScore instanceof Number ? ((Number) hybridScore).doubleValue() : doc.getScore();
                         sourceDocs.add(new ChatResponse.SourceDoc(
                                 title != null ? title.toString() : (fileName != null ? fileName.toString() : "文档" + (i + 1)),
                                 fileName != null ? fileName.toString() : "",
@@ -163,7 +169,7 @@ public class AgentAppService {
                     userContent = question + "\n\n" + ragContext;
                 }
             } catch (Exception e) {
-                log.warn("⚠️ RAG 向量检索失败（通常是 Ollama embedding 模型未下载），已跳过，不影响 Agent 工具调用。原因: {}", e.getMessage());
+                log.warn("⚠️ RAG 检索失败，已跳过，不影响 Agent 工具调用。原因: {}", e.getMessage());
             }
         }
         messages.add(new MessageDTO(Role.USER, userContent));

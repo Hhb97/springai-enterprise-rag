@@ -57,7 +57,7 @@ public class RagAppService {
         log.info("   * 待 Spring AI 后续版本加回 BM25/RRF 后，可在本类中无侵入切换");
         this.documentRetriever = VectorStoreDocumentRetriever.builder()
                 .vectorStore(springAiVectorStore)
-                .topK(topK * 2)
+                .topK(topK * 5)
                 .build();
         log.info("✅ Spring AI 2.0 DocumentRetriever 初始化完成: VectorStoreDocumentRetriever");
     }
@@ -66,9 +66,14 @@ public class RagAppService {
         log.info("🔄 向量库数据有更新，重新初始化 Spring AI 2.0 DocumentRetriever...");
         this.documentRetriever = VectorStoreDocumentRetriever.builder()
                 .vectorStore(springAiVectorStore)
-                .topK(topK * 2)
+                .topK(topK * 5)
                 .build();
         log.info("✅ DocumentRetriever 重新绑定完成");
+    }
+
+    public List<DocumentChunk> retrieveDocuments(String question, boolean enableHybridSearch, int customTopK) {
+        int effectiveTopK = customTopK > 0 ? customTopK : topK;
+        return enableHybridSearch ? hybridSearch(question, effectiveTopK) : vectorSearch(question, effectiveTopK);
     }
 
     public Map<String, Object> ask(String question) {
@@ -205,21 +210,111 @@ public class RagAppService {
                 .collect(Collectors.toList());
     }
 
+    private static final Map<String, String[]> SYNONYM_MAP = new HashMap<>();
+    static {
+        SYNONYM_MAP.put("账单", new String[]{"计费", "账单", "收费", "结算"});
+        SYNONYM_MAP.put("计费", new String[]{"计费", "账单", "收费", "结算"});
+        SYNONYM_MAP.put("收费", new String[]{"计费", "账单", "收费", "结算"});
+        SYNONYM_MAP.put("结算", new String[]{"计费", "账单", "收费", "结算"});
+        SYNONYM_MAP.put("流程", new String[]{"流程", "步骤", "过程", "操作"});
+        SYNONYM_MAP.put("步骤", new String[]{"流程", "步骤", "过程", "操作"});
+        SYNONYM_MAP.put("用户", new String[]{"用户", "账号", "账户", "成员"});
+        SYNONYM_MAP.put("新增", new String[]{"新增", "添加", "创建", "新建"});
+        SYNONYM_MAP.put("设备", new String[]{"设备", "装置", "仪器"});
+        SYNONYM_MAP.put("能耗", new String[]{"能耗", "耗电", "用电", "消耗"});
+    }
+
+    private Set<String> expandChineseKeywords(String text) {
+        Set<String> keywords = new LinkedHashSet<>();
+        if (text == null || text.isBlank()) return keywords;
+        String lower = text.trim().toLowerCase();
+
+        for (String word : lower.split("\\s+")) {
+            if (word.isBlank()) continue;
+            keywords.add(word);
+
+            boolean hasChinese = false;
+            for (char c : word.toCharArray()) {
+                if (Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN) {
+                    hasChinese = true;
+                    break;
+                }
+            }
+            if (!hasChinese) continue;
+
+            for (int i = 0; i < word.length(); i++) {
+                for (int j = i + 2; j <= Math.min(word.length(), i + 4); j++) {
+                    keywords.add(word.substring(i, j));
+                }
+            }
+            for (char c : word.toCharArray()) {
+                if (Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN) {
+                    keywords.add(String.valueOf(c));
+                }
+            }
+            for (Map.Entry<String, String[]> entry : SYNONYM_MAP.entrySet()) {
+                if (word.contains(entry.getKey())) {
+                    for (String syn : entry.getValue()) {
+                        keywords.add(syn);
+                        for (int i = 0; i <= word.length() - entry.getKey().length(); i++) {
+                            if (word.startsWith(entry.getKey(), i)) {
+                                String replaced = word.substring(0, i) + syn + word.substring(i + entry.getKey().length());
+                                if (!replaced.equals(word)) keywords.add(replaced);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        keywords.removeIf(k -> k.length() == 1 && !SYNONYM_MAP.containsKey(k));
+        return keywords;
+    }
+
     private List<Map.Entry<DocumentChunk, Double>> keywordSearchWithScore(String question, int topK) {
-        List<DocumentChunk> allDocs = vectorStorePort.listAll(topK * 5);
+        List<DocumentChunk> allDocs = vectorStorePort.listAll(topK * 10);
         List<Map.Entry<DocumentChunk, Double>> scoredDocs = new ArrayList<>();
+        Set<String> keywords = expandChineseKeywords(question);
         String lowerQuestion = question.toLowerCase();
+
+        if (keywords.isEmpty()) return scoredDocs;
+        log.debug("🔍 关键词扩展结果: question={}, keywords={}", question, keywords);
 
         for (DocumentChunk doc : allDocs) {
             String lowerText = doc.getText().toLowerCase();
             double score = 0;
-            String[] keywords = lowerQuestion.split("\\s+");
-            for (String keyword : keywords) {
-                if (lowerText.contains(keyword)) score += 1.0 / keywords.length;
+            int matched = 0;
+
+            for (String kw : keywords) {
+                if (kw.length() <= 1) continue;
+                int count = 0, idx = 0;
+                while ((idx = lowerText.indexOf(kw, idx)) != -1) {
+                    count++;
+                    idx += kw.length();
+                }
+                if (count > 0) {
+                    double weight = kw.length() >= 3 ? 1.2 : (kw.length() == 2 ? 1.0 : 0.5);
+                    score += weight * Math.min(count, 3) / keywords.size();
+                    matched++;
+                }
             }
+
+            for (char c : lowerQuestion.toCharArray()) {
+                if (Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN) {
+                    if (lowerText.indexOf(c) >= 0) score += 0.08;
+                }
+            }
+
             Object titleMeta = doc.getMetadata() == null ? null : doc.getMetadata().get("title");
-            if (titleMeta != null && titleMeta.toString().toLowerCase().contains(lowerQuestion)) score += 0.3;
-            if (score > 0) scoredDocs.add(new AbstractMap.SimpleEntry<>(doc, score));
+            if (titleMeta != null) {
+                String title = titleMeta.toString().toLowerCase();
+                if (title.contains(lowerQuestion)) score += 0.5;
+                else for (String kw : keywords) {
+                    if (kw.length() >= 2 && title.contains(kw)) score += 0.15;
+                }
+            }
+
+            if (matched == 0 && score < 0.25) continue;
+            scoredDocs.add(new AbstractMap.SimpleEntry<>(doc, score));
         }
         return scoredDocs.stream()
                 .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
