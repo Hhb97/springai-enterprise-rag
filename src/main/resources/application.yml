@@ -1,4 +1,4 @@
-server:
+﻿server:
   port: 8900
 
 spring:
@@ -23,16 +23,32 @@ spring:
     properties:
       hibernate:
         format_sql: true
+        # Spring Boot 4.x + Hibernate 7.2 不再自动猜测方言，必须显式指定 H2
+        dialect: org.hibernate.dialect.H2Dialect
+        # 关闭 Hibernate 7 对 enum/ddl-auto 的严格检查（避免老 DB 表元数据缺失时报错）
+        schema_management:
+          tool:
+            uniqueConstraintStrategy: skip
 
   ai:
     ollama:
       base-url: http://192.168.221.130:11434
-      chat:
+      # Spring AI 2.0 GA 聊天模型（AutoConfiguration 正确识别的前缀）
+      default-chat-options:
         model: qwen2.5:1.5b
+        temperature: 0.3
+        num-predict: 1024
+      chat:
         options:
+          model: qwen2.5:1.5b
           temperature: 0.3
           num-predict: 1024
+      # Spring AI 2.0 GA embedding 模型（两种写法都留，覆盖不同 BOM 版本的属性绑定）
+      # 错误：mxbai-embed-large 是默认值，很多 Ollama 没 pull，必须显式指定 nomic-embed-text
       embedding:
+        options:
+          model: nomic-embed-text
+      default-embedding-options:
         model: nomic-embed-text
 
 # RAG 配置
@@ -41,6 +57,24 @@ rag:
   hybrid-search:
     keyword-weight: 0.3
     vector-weight: 0.7
+
+# Spring AI 2.0 Agent 相关配置（预留）
+agent:
+  default-max-iterations: 5
+  default-memory-size: 20
+
+# Spring Boot 4.x Actuator + Spring AI 2.0 Observation（生产可开）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  observations:
+    spring-ai:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
 
 # 文件存储配置
 storage:
@@ -62,15 +96,3 @@ prompt:
     max-history: 20
   rag:
     role: 你是专业的后端管理平台 AI 助手
-
-# === LLM 模块化配置（供 DomainServiceConfig 读取） ===
-# llm:
-#   provider: ollama        # ollama / openai / zhipu
-#   model: qwen2.5:1.5b
-#   embedding-model: nomic-embed-text
-#   temperature: 0.3
-#   max-tokens: 1024
-
-# === 横切关注点（后续可启用） ===
-# resilience4j.circuitbreaker: ...  # 熔断降级
-# management.endpoints.web.exposure.include: health,info,metrics,prometheus

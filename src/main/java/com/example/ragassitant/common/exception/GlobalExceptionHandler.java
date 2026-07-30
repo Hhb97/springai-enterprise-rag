@@ -7,11 +7,19 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiResponse<Void>> handleNoResourceFoundException(NoResourceFoundException e) {
+        log.warn("静态资源未找到: {}", e.getResourcePath());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiResponse.fail("NOT_FOUND", "资源不存在: " + e.getResourcePath()));
+    }
 
     @ExceptionHandler(BizException.class)
     public ResponseEntity<ApiResponse<Void>> handleBizException(BizException e) {

@@ -5,8 +5,14 @@ import com.example.ragassitant.domain.model.RagAnswer;
 import com.example.ragassitant.domain.service.PromptBuilder;
 import com.example.ragassitant.domain.spi.LlmPort;
 import com.example.ragassitant.domain.spi.VectorStorePort;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.rag.Query;
+import org.springframework.ai.rag.retrieval.search.DocumentRetriever;
+import org.springframework.ai.rag.retrieval.search.VectorStoreDocumentRetriever;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -20,23 +26,49 @@ public class RagAppService {
 
     private final LlmPort llmPort;
     private final VectorStorePort vectorStorePort;
+    private final VectorStore springAiVectorStore;
     private final PromptBuilder promptBuilder;
     private final int topK;
     private final double keywordWeight;
     private final double vectorWeight;
 
+    private volatile DocumentRetriever documentRetriever;
+
     public RagAppService(LlmPort llmPort,
                          VectorStorePort vectorStorePort,
+                         VectorStore springAiVectorStore,
                          PromptBuilder promptBuilder,
                          @Value("${rag.top-k:3}") int topK,
                          @Value("${rag.hybrid-search.keyword-weight:0.3}") double keywordWeight,
                          @Value("${rag.hybrid-search.vector-weight:0.7}") double vectorWeight) {
         this.llmPort = llmPort;
         this.vectorStorePort = vectorStorePort;
+        this.springAiVectorStore = springAiVectorStore;
         this.promptBuilder = promptBuilder;
         this.topK = topK;
         this.keywordWeight = keywordWeight;
         this.vectorWeight = vectorWeight;
+    }
+
+    @PostConstruct
+    public void initRetrievers() {
+        log.info("🔧 初始化 Spring AI 2.0 官方 DocumentRetriever (Spring AI 2.0 GA VectorStoreDocumentRetriever)");
+        log.info("   * 说明：Spring AI 2.0.0 GA 未内置 BM25Retriever / EnsembleRetriever，混合检索继续采用项目原有的线性加权实现");
+        log.info("   * 待 Spring AI 后续版本加回 BM25/RRF 后，可在本类中无侵入切换");
+        this.documentRetriever = VectorStoreDocumentRetriever.builder()
+                .vectorStore(springAiVectorStore)
+                .topK(topK * 2)
+                .build();
+        log.info("✅ Spring AI 2.0 DocumentRetriever 初始化完成: VectorStoreDocumentRetriever");
+    }
+
+    public void rebuildBm25Index() {
+        log.info("🔄 向量库数据有更新，重新初始化 Spring AI 2.0 DocumentRetriever...");
+        this.documentRetriever = VectorStoreDocumentRetriever.builder()
+                .vectorStore(springAiVectorStore)
+                .topK(topK * 2)
+                .build();
+        log.info("✅ DocumentRetriever 重新绑定完成");
     }
 
     public Map<String, Object> ask(String question) {
@@ -98,12 +130,39 @@ public class RagAppService {
     }
 
     private List<DocumentChunk> vectorSearch(String question, int topK) {
-        log.info("📨 执行向量检索...");
-        return vectorStorePort.similaritySearch(question, topK);
+        log.info("📨 执行向量检索 [Spring AI 2.0 VectorStoreDocumentRetriever]...");
+        try {
+            Query query = new Query(question);
+            List<Document> results = documentRetriever.retrieve(query);
+            if (results == null || results.isEmpty()) {
+                log.warn("⚠️ Spring AI 2.0 新接口无结果，回退到 VectorStorePort 原生接口");
+                return vectorStorePort.similaritySearch(question, topK);
+            }
+            return results.stream()
+                    .limit(topK)
+                    .map(d -> {
+                        DocumentChunk c = new DocumentChunk();
+                        c.setId(d.getId());
+                        c.setText(d.getText());
+                        c.setScore(d.getScore() != null ? d.getScore().doubleValue() : null);
+                        c.setMetadata(d.getMetadata() != null ? new HashMap<>(d.getMetadata()) : new HashMap<>());
+                        if (c.getMetadata() != null) c.getMetadata().put("retrievalMode", "SPRING_AI_2_VECTORSTORE_DOC_RETRIEVER");
+                        return c;
+                    })
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            log.warn("⚠️ Spring AI 2.0 新接口异常，回退到 VectorStorePort: {}", e.getMessage());
+            return vectorStorePort.similaritySearch(question, topK);
+        }
     }
 
     private List<DocumentChunk> hybridSearch(String question, int topK) {
-        log.info("📨 执行混合检索 (keyword:{}, vector:{})...", keywordWeight, vectorWeight);
+        log.info("📨 执行混合检索 [线性加权: 向量权重{} / 关键词权重{}]", vectorWeight, keywordWeight);
+        log.info("   * 说明：待 Spring AI 后续版本内置 BM25Retriever + EnsembleRetriever(RRF) 后自动升级，无需改接口");
+        return linearWeightHybridSearch(question, topK);
+    }
+
+    private List<DocumentChunk> linearWeightHybridSearch(String question, int topK) {
         List<DocumentChunk> vectorResults = vectorSearch(question, topK * 2);
         List<Map.Entry<DocumentChunk, Double>> keywordResults = keywordSearchWithScore(question, topK * 2);
 
@@ -140,13 +199,13 @@ public class RagAppService {
                     DocumentChunk doc = entry.getValue();
                     if (doc.getMetadata() == null) doc.setMetadata(new HashMap<>());
                     doc.getMetadata().put("hybridScore", scores.get(entry.getKey()));
+                    doc.getMetadata().put("retrievalMode", "HYBRID_LINEAR_WEIGHT_SPRINGAI2");
                     return doc;
                 })
                 .collect(Collectors.toList());
     }
 
     private List<Map.Entry<DocumentChunk, Double>> keywordSearchWithScore(String question, int topK) {
-        log.info("📨 执行关键词检索...");
         List<DocumentChunk> allDocs = vectorStorePort.listAll(topK * 5);
         List<Map.Entry<DocumentChunk, Double>> scoredDocs = new ArrayList<>();
         String lowerQuestion = question.toLowerCase();

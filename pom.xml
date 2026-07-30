@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.4.2</version>
+        <version>4.0.7</version>
         <relativePath/>
     </parent>
 
@@ -15,11 +15,17 @@
     <artifactId>rag-assistant</artifactId>
     <version>1.0.0</version>
     <name>rag-assistant</name>
-    <description>RAG AI Assistant - Spring Boot 3.x + Spring AI 1.1.6 + Ollama</description>
+    <description>RAG AI Assistant - Spring Boot 4.0 + Spring AI 2.0.0 GA + JDK 21 + Ollama + BM25 Hybrid Search</description>
 
     <properties>
-        <java.version>17</java.version>
-        <spring-ai.version>1.1.6</spring-ai.version>
+        <java.version>21</java.version>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <!-- 实测确认：Spring AI 2.0.0 GA 仍然是 groupId=org.springframework.ai，
+             Maven Central 上 io.spring.ai 这个 groupId 根本不存在！
+             Spring Boot 4.0.7 自带 Spring Framework 7.0.8，已包含 org.springframework.core.retry.RetryTemplate
+             （Spring AI 2.0 Ollama AutoConfiguration 强依赖此类）-->
+        <spring-ai.version>2.0.0</spring-ai.version>
     </properties>
 
     <dependencyManagement>
@@ -41,10 +47,22 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- Spring AI Ollama -->
+        <!-- Spring Boot Actuator (Spring AI 2.0 原生 Micrometer Observation) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- Spring AI Ollama (2.0.0 GA) -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-ollama</artifactId>
+        </dependency>
+
+        <!-- Spring AI RAG 模块 (BM25Retriever, EnsembleRetriever 等高级检索) -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-rag</artifactId>
         </dependency>
 
         <!-- Spring AI Vector Store (基础模块，含 SimpleVectorStore) -->

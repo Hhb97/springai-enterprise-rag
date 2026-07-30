@@ -19,8 +19,10 @@ public class SpringAiOllamaAdapter implements LlmPort {
 
     private static final Logger log = LoggerFactory.getLogger(SpringAiOllamaAdapter.class);
     private final ChatClient chatClient;
+    private final ChatClient.Builder chatClientBuilder;
 
     public SpringAiOllamaAdapter(ChatClient.Builder chatClientBuilder) {
+        this.chatClientBuilder = chatClientBuilder;
         this.chatClient = chatClientBuilder.build();
     }
 
@@ -51,21 +53,50 @@ public class SpringAiOllamaAdapter implements LlmPort {
     @Override
     public String chatWithRawMessages(List<MessageDTO> messages) {
         try {
-            List<Message> springMessages = new ArrayList<>();
-            if (messages != null) {
-                for (MessageDTO dto : messages) {
-                    if (dto == null || dto.content == null) continue;
-                    switch (dto.role == null ? Role.USER : dto.role) {
-                        case SYSTEM -> springMessages.add(new SystemMessage(dto.content));
-                        case ASSISTANT -> springMessages.add(new AssistantMessage(dto.content));
-                        case USER -> springMessages.add(new UserMessage(dto.content));
-                    }
-                }
-            }
-            return chatClient.prompt().messages(springMessages).call().content();
+            return chatClient.prompt().messages(toSpringMessages(messages)).call().content();
         } catch (Exception e) {
             log.error("❌ LLM RawMessages 调用失败", e);
             return null;
         }
+    }
+
+    @Override
+    public String chatWithAutoToolCalling(List<MessageDTO> messages, int maxToolCalls, List<Object> toolBeans) {
+        try {
+            Object[] tools = toolBeans == null ? new Object[0] : toolBeans.toArray();
+            int maxCalls = maxToolCalls <= 0 ? 5 : maxToolCalls;
+            log.info("🤖[Spring AI 2.0 官方 Tool Calling] 开始：消息数={}, 最大工具轮次={}, 工具Bean数={}",
+                    messages == null ? 0 : messages.size(), maxCalls, tools.length);
+
+            // Spring AI 2.0 ChatClient 内部自动完成 Agent 循环，不需要手写 for：
+            //   LLM → 检测 tool_call 响应 → 反射调用 @Tool 注解方法 → 自动塞回 ToolMessage → 循环 → 出最终纯文本
+            String finalContent = chatClientBuilder.build()
+                    .prompt()
+                    .messages(toSpringMessages(messages))
+                    .tools(tools)
+                    .call()
+                    .content();
+
+            log.info("✅[Spring AI 2.0 官方 Tool Calling] 结束：最终回答长度={}", finalContent == null ? 0 : finalContent.length());
+            return finalContent;
+        } catch (Exception e) {
+            log.error("❌ Spring AI 2.0 官方 Tool Calling 执行失败", e);
+            return null;
+        }
+    }
+
+    private static List<Message> toSpringMessages(List<MessageDTO> messages) {
+        List<Message> springMessages = new ArrayList<>();
+        if (messages != null) {
+            for (MessageDTO dto : messages) {
+                if (dto == null || dto.content == null) continue;
+                switch (dto.role == null ? Role.USER : dto.role) {
+                    case SYSTEM -> springMessages.add(new SystemMessage(dto.content));
+                    case ASSISTANT -> springMessages.add(new AssistantMessage(dto.content));
+                    case USER -> springMessages.add(new UserMessage(dto.content));
+                }
+            }
+        }
+        return springMessages;
     }
 }

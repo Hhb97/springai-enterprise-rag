@@ -32,13 +32,16 @@ public class IngestAppService {
     private final VectorStorePort vectorStorePort;
     private final DocumentReaderPort documentReaderPort;
     private final DocumentVersionJpaRepository documentVersionRepository;
+    private final RagAppService ragAppService;
 
     public IngestAppService(VectorStorePort vectorStorePort,
                             DocumentReaderPort documentReaderPort,
-                            DocumentVersionJpaRepository documentVersionRepository) {
+                            DocumentVersionJpaRepository documentVersionRepository,
+                            RagAppService ragAppService) {
         this.vectorStorePort = vectorStorePort;
         this.documentReaderPort = documentReaderPort;
         this.documentVersionRepository = documentVersionRepository;
+        this.ragAppService = ragAppService;
     }
 
     public int ingestAll() throws IOException {
@@ -81,6 +84,12 @@ public class IngestAppService {
         log.info("✅ 向量库已构建，共 {} 条记录", allChunks.size());
 
         vectorStorePort.persist();
+        log.info("🔄 刷新 Spring AI 2.0 BM25 倒排索引...");
+        try {
+            ragAppService.rebuildBm25Index();
+        } catch (Exception e) {
+            log.warn("⚠️ BM25 索引刷新失败（不影响主流程，降级使用线性加权检索）: {}", e.getMessage());
+        }
         return allChunks.size();
     }
 
@@ -116,6 +125,12 @@ public class IngestAppService {
 
         vectorStorePort.persist();
         log.info("✅ 文档版本 {} v{} 已入库，共 {} 条向量", docVersion.getDocumentId(), docVersion.getVersion(), chunks.size());
+        log.info("🔄 刷新 Spring AI 2.0 BM25 倒排索引...");
+        try {
+            ragAppService.rebuildBm25Index();
+        } catch (Exception e) {
+            log.warn("⚠️ BM25 索引刷新失败（不影响主流程）: {}", e.getMessage());
+        }
         return chunks.size();
     }
 

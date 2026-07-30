@@ -382,7 +382,7 @@
                     }
                     appendMessage(html, 'bot');
                 } else {
-                    appendMessage('❌ 请求失败: ' + (data.detail || data.message || '未知错误'), 'bot');
+                    appendMessage('❌ 请求失败: ' + (data.detail || data.message || data.answer || '未知错误'), 'bot');
                 }
             } catch (err) {
                 chatEl.removeChild(loadingEl);

@@ -9,6 +9,7 @@ import com.example.ragassitant.domain.service.ToolCallValidator;
 import com.example.ragassitant.domain.spi.*;
 import com.example.ragassitant.domain.spi.LlmPort.MessageDTO;
 import com.example.ragassitant.domain.spi.LlmPort.MessageDTO.Role;
+import com.example.ragassitant.infrastructure.agent.DeviceTools;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +39,8 @@ public class AgentAppService {
     private final ToolCallValidator toolCallValidator;
     private final PromptBuilder promptBuilder;
     private final AgentTraceStorePort traceStore;
+    // Spring AI 2.0 官方 @Tool 注解的 Bean，ChatClient.tools(deviceTools) 自动识别 6 个工具
+    private final DeviceTools deviceTools;
 
     public AgentAppService(LlmPort llmPort,
                            VectorStorePort vectorStorePort,
@@ -47,7 +50,8 @@ public class AgentAppService {
                            ToolCallParser toolCallParser,
                            ToolCallValidator toolCallValidator,
                            PromptBuilder promptBuilder,
-                           AgentTraceStorePort traceStore) {
+                           AgentTraceStorePort traceStore,
+                           DeviceTools deviceTools) {
         this.llmPort = llmPort;
         this.vectorStorePort = vectorStorePort;
         this.conversationStorePort = conversationStorePort;
@@ -57,7 +61,8 @@ public class AgentAppService {
         this.toolCallValidator = toolCallValidator;
         this.promptBuilder = promptBuilder;
         this.traceStore = traceStore;
-        log.info("✅ AgentAppService 初始化完成（DDD 应用层 - Ports Adapters 解耦 + 决策链路持久化）");
+        this.deviceTools = deviceTools;
+        log.info("✅ AgentAppService 初始化完成（Spring AI 2.0 官方自动 Tool Calling Agent，不再手写 for 循环）");
     }
 
     public ChatResponse chat(String question, String sessionId, boolean useRag) {
@@ -74,87 +79,100 @@ public class AgentAppService {
             }
         }
 
+        String thisTurnUserQuestion = question;
+        String finalAnswer = "";
         List<ChatResponse.SourceDoc> sourceDocs = new ArrayList<>();
+
+        // ===== 优化 1：启发式路由 FORCE_EXEC 提到 RAG 之前，纯工具类问题（列设备、查能耗）完全跳过向量检索 =====
+        if (ENABLE_HEURISTIC_ROUTE) {
+            ToolCall forcedTool = heuristicRouter.route(question);
+            if (forcedTool != null && HEURISTIC_STRATEGY == HeuristicStrategy.FORCE_EXEC) {
+                long toolStart = System.currentTimeMillis();
+                log.info("🎯[FORCE_EXEC] 启发式命中（先于 RAG）→ 强制调用工具 {}({})，跳过向量检索", forcedTool.name, forcedTool.arguments);
+                String forcedResult;
+                String toolErr = null;
+                try {
+                    forcedResult = toolRegistry.invoke(forcedTool);
+                } catch (Exception e) {
+                    forcedResult = null;
+                    toolErr = e.getMessage();
+                }
+                long toolMs = System.currentTimeMillis() - toolStart;
+                log.info("🎯[FORCE_EXEC] 工具 {} 执行完毕，结果长度={}", forcedTool.name, forcedResult == null ? 0 : forcedResult.length());
+                traceStore.recordDecision(sessionId, 1, "HEURISTIC_TOOL",
+                        forcedTool.name, forcedTool.arguments, forcedResult,
+                        null, null, true, "FORCE_EXEC",
+                        toolMs, toolErr == null ? "OK" : "ERROR", toolErr);
+
+                messages.add(new MessageDTO(Role.USER, question));
+                String argsJson;
+                try { argsJson = MAPPER.writeValueAsString(forcedTool.arguments); }
+                catch (Exception e) { argsJson = "{}"; }
+                messages.add(new MessageDTO(Role.ASSISTANT, "[{\"name\":\"" + forcedTool.name + "\",\"arguments\":" + argsJson + "}]"));
+                String userFeedback = promptBuilder.buildForcedToolExecutionFeedback(forcedResult);
+                messages.add(new MessageDTO(Role.USER, userFeedback));
+
+                long llmStart = System.currentTimeMillis();
+                String summary = callLLM(messages);
+                long llmMs = System.currentTimeMillis() - llmStart;
+                if (summary != null && !summary.isBlank()) {
+                    finalAnswer = cleanupAnswer(summary);
+                } else {
+                    finalAnswer = forcedResult == null ? "" : forcedResult;
+                }
+                traceStore.recordDecision(sessionId, 1, "LLM_SUMMARY",
+                        null, null, null,
+                        messages.size() + " messages", summary,
+                        true, "FORCE_EXEC",
+                        llmMs, "OK", null);
+                log.info("✅[FORCE_EXEC] 流程结束：LLM 总结结果长度={}", finalAnswer.length());
+
+                if (sessionId != null && !sessionId.isBlank()) {
+                    conversationStorePort.saveUser(sessionId, thisTurnUserQuestion);
+                    conversationStorePort.saveAssistant(sessionId, finalAnswer);
+                }
+                traceStore.recordDecision(sessionId, 1, "FINAL",
+                        null, null, null,
+                        thisTurnUserQuestion, finalAnswer,
+                        true, "FORCE_EXEC",
+                        null, "OK", null);
+                return new ChatResponse(finalAnswer, sourceDocs);
+            }
+        }
+
+        // ===== RAG 检索：只在启发式没命中 FORCE_EXEC 时才执行，且包 try-catch（embedding 模型异常不阻断 Agent）=====
         String userContent = question;
         if (useRag) {
-            List<DocumentChunk> docs = vectorStorePort.similaritySearch(question, 4);
-            if (docs != null && !docs.isEmpty()) {
-                StringBuilder ragContext = new StringBuilder();
-                ragContext.append("## 知识库参考内容\n\n");
-                for (int i = 0; i < docs.size(); i++) {
-                    DocumentChunk doc = docs.get(i);
-                    ragContext.append("**[").append(i + 1).append("]** ").append(doc.getText()).append("\n\n");
-                    Object title = doc.getMetadata() == null ? null : doc.getMetadata().get("title");
-                    Object fileName = doc.getMetadata() == null ? null : doc.getMetadata().get("fileName");
-                    Double score = doc.getScore();
-                    sourceDocs.add(new ChatResponse.SourceDoc(
-                            title != null ? title.toString() : (fileName != null ? fileName.toString() : "文档" + (i + 1)),
-                            fileName != null ? fileName.toString() : "",
-                            score
-                    ));
+            try {
+                List<DocumentChunk> docs = vectorStorePort.similaritySearch(question, 4);
+                if (docs != null && !docs.isEmpty()) {
+                    StringBuilder ragContext = new StringBuilder();
+                    ragContext.append("## 知识库参考内容\n\n");
+                    for (int i = 0; i < docs.size(); i++) {
+                        DocumentChunk doc = docs.get(i);
+                        ragContext.append("**[").append(i + 1).append("]** ").append(doc.getText()).append("\n\n");
+                        Object title = doc.getMetadata() == null ? null : doc.getMetadata().get("title");
+                        Object fileName = doc.getMetadata() == null ? null : doc.getMetadata().get("fileName");
+                        Double score = doc.getScore();
+                        sourceDocs.add(new ChatResponse.SourceDoc(
+                                title != null ? title.toString() : (fileName != null ? fileName.toString() : "文档" + (i + 1)),
+                                fileName != null ? fileName.toString() : "",
+                                score
+                        ));
+                    }
+                    userContent = question + "\n\n" + ragContext;
                 }
-                userContent = question + "\n\n" + ragContext;
+            } catch (Exception e) {
+                log.warn("⚠️ RAG 向量检索失败（通常是 Ollama embedding 模型未下载），已跳过，不影响 Agent 工具调用。原因: {}", e.getMessage());
             }
         }
         messages.add(new MessageDTO(Role.USER, userContent));
 
-        String thisTurnUserQuestion = question;
-        String finalAnswer = "";
-
+        // ===== 启发式路由 RECOMMEND_LLM / 未命中分支 =====
         if (ENABLE_HEURISTIC_ROUTE) {
             ToolCall forcedTool = heuristicRouter.route(question);
             if (forcedTool != null) {
-                if (HEURISTIC_STRATEGY == HeuristicStrategy.FORCE_EXEC) {
-                    long toolStart = System.currentTimeMillis();
-                    log.info("🎯[FORCE_EXEC] 启发式命中 → 强制调用工具 {}({})", forcedTool.name, forcedTool.arguments);
-                    String forcedResult;
-                    String toolErr = null;
-                    try {
-                        forcedResult = toolRegistry.invoke(forcedTool);
-                    } catch (Exception e) {
-                        forcedResult = null;
-                        toolErr = e.getMessage();
-                    }
-                    long toolMs = System.currentTimeMillis() - toolStart;
-                    log.info("🎯[FORCE_EXEC] 工具 {} 执行完毕，结果长度={}", forcedTool.name, forcedResult == null ? 0 : forcedResult.length());
-                    traceStore.recordDecision(sessionId, 1, "HEURISTIC_TOOL",
-                            forcedTool.name, forcedTool.arguments, forcedResult,
-                            null, null, true, "FORCE_EXEC",
-                            toolMs, toolErr == null ? "OK" : "ERROR", toolErr);
-
-                    String argsJson;
-                    try { argsJson = MAPPER.writeValueAsString(forcedTool.arguments); }
-                    catch (Exception e) { argsJson = "{}"; }
-                    messages.add(new MessageDTO(Role.ASSISTANT, "[{\"name\":\"" + forcedTool.name + "\",\"arguments\":" + argsJson + "}]"));
-                    String userFeedback = promptBuilder.buildForcedToolExecutionFeedback(forcedResult);
-                    messages.add(new MessageDTO(Role.USER, userFeedback));
-
-                    long llmStart = System.currentTimeMillis();
-                    String summary = callLLM(messages);
-                    long llmMs = System.currentTimeMillis() - llmStart;
-                    if (summary != null && !summary.isBlank()) {
-                        finalAnswer = cleanupAnswer(summary);
-                    } else {
-                        finalAnswer = forcedResult == null ? "" : forcedResult;
-                    }
-                    traceStore.recordDecision(sessionId, 1, "LLM_SUMMARY",
-                            null, null, null,
-                            messages.size() + " messages", summary,
-                            true, "FORCE_EXEC",
-                            llmMs, "OK", null);
-                    log.info("✅[FORCE_EXEC] 流程结束：LLM 总结结果长度={}", finalAnswer.length());
-
-                    if (sessionId != null && !sessionId.isBlank()) {
-                        conversationStorePort.saveUser(sessionId, thisTurnUserQuestion);
-                        conversationStorePort.saveAssistant(sessionId, finalAnswer);
-                    }
-                    traceStore.recordDecision(sessionId, 1, "FINAL",
-                            null, null, null,
-                            thisTurnUserQuestion, finalAnswer,
-                            true, "FORCE_EXEC",
-                            null, "OK", null);
-                    return new ChatResponse(finalAnswer, sourceDocs);
-                } else {
+                if (HEURISTIC_STRATEGY != HeuristicStrategy.FORCE_EXEC) {
                     log.info("💡[RECOMMEND_LLM] 启发式命中 → 推荐工具 {}({})（最终由 LLM 决定）", forcedTool.name, forcedTool.arguments);
                     String argsJson;
                     try { argsJson = MAPPER.writeValueAsString(forcedTool.arguments); }
@@ -170,81 +188,45 @@ public class AgentAppService {
                     messages.add(new MessageDTO(Role.USER, augmented));
                 }
             } else {
-                log.info("🟡 启发式未命中，交由 LLM 自主选择工具");
+                log.info("🟡 启发式未命中，交由 Spring AI 2.0 ChatClient 自动 Tool Calling（无需手写 for）");
             }
         } else {
-            log.info("⚪ 启发式路由已关闭，完全由 LLM 选择工具");
+            log.info("⚪ 启发式路由已关闭，完全由 Spring AI 2.0 ChatClient 自动 Tool Calling");
         }
 
-        for (int i = 0; i < MAX_TOOL_CALLS; i++) {
-            int round = i + 1;
-            long llmStart = System.currentTimeMillis();
-            String modelOutput = callLLM(messages);
-            long llmMs = System.currentTimeMillis() - llmStart;
-            traceStore.recordDecision(sessionId, round, "LLM_DECIDE",
+        // ===== 🔴 Spring AI 2.0 官方自动 Tool Calling（替换原来的 61 行手写 for 循环）🔴 =====
+        // 对比：
+        //   - 改造前：61 行代码 → 手动 for (i=0;i<5) → 手动解析 toolCallParser.parse() → 手动校验 → 手动 invoke → 手动拼结果 → 手动循环
+        //   - 改造后：1 行代码  → ChatClient 内部自动做全部流程，DeviceTools 上 @Tool 注解的 6 个方法被自动注册
+        long agentStart = System.currentTimeMillis();
+        traceStore.recordDecision(sessionId, 1, "LLM_AGENT_AUTO_LOOP_START",
+                null, null, null,
+                messages.size() + " messages", "Spring AI 2.0 ChatClient.tools(DeviceTools)",
+                false, "SPRING_AI_2_AUTO",
+                null, "OK", null);
+
+        String modelOutput = llmPort.chatWithAutoToolCalling(messages, MAX_TOOL_CALLS, List.of(deviceTools));
+        long agentMs = System.currentTimeMillis() - agentStart;
+
+        if (modelOutput == null || modelOutput.isBlank()) {
+            finalAnswer = "❌ Agent 处理失败（LLM 返回为空或调用异常）";
+            traceStore.recordDecision(sessionId, 1, "FINAL",
                     null, null, null,
-                    messages.size() + " messages", modelOutput,
-                    false, null, llmMs,
-                    modelOutput != null ? "OK" : "ERROR",
-                    modelOutput == null ? "LLM 返回为空" : null);
-
-            if (modelOutput == null || modelOutput.isBlank()) {
-                finalAnswer = "❌ 模型返回内容为空";
-                break;
-            }
-            List<ToolCall> toolCalls = toolCallParser.parse(modelOutput);
-            if (toolCalls.isEmpty()) {
-                log.info("✅ 第 {} 轮：没有工具调用，返回最终回答，长度={}", round, modelOutput.length());
-                finalAnswer = cleanupAnswer(modelOutput);
-                traceStore.recordDecision(sessionId, round, "FINAL",
-                        null, null, null,
-                        thisTurnUserQuestion, finalAnswer,
-                        false, null, null, "OK", null);
-                break;
-            }
-
-            messages.add(new MessageDTO(Role.ASSISTANT, modelOutput));
-
-            StringBuilder toolResults = new StringBuilder();
-            boolean hasValidTool = false;
-            for (ToolCall tc : toolCalls) {
-                long tStart = System.currentTimeMillis();
-                String validationError = toolCallValidator.validate(tc.name, tc.arguments);
-                String result;
-                String tErr = null;
-                if (validationError != null) {
-                    log.warn("⚠️ 工具 {} 参数校验失败: {}", tc.name, validationError);
-                    result = "❌ " + validationError;
-                    tErr = validationError;
-                } else {
-                    log.info("🔧 第 {} 轮：执行工具 {}({})", round, tc.name, tc.arguments);
-                    try {
-                        result = toolRegistry.invoke(tc);
-                        hasValidTool = true;
-                    } catch (Exception e) {
-                        result = "❌ " + e.getMessage();
-                        tErr = e.getMessage();
-                    }
-                    log.info("🔧 工具 {} 执行结果长度={}", tc.name, result == null ? 0 : result.length());
-                }
-                long tMs = System.currentTimeMillis() - tStart;
-                traceStore.recordDecision(sessionId, round, "TOOL_INVOKE",
-                        tc.name, tc.arguments, result,
-                        null, null, false, null,
-                        tMs, tErr == null ? "OK" : "VALIDATE_ERROR", tErr);
-                toolResults.append("\n### 工具调用结果：").append(tc.name).append("\n```\n").append(result == null ? "" : result).append("\n```\n");
-            }
-
-            String userFeedback = promptBuilder.buildToolResultsFeedback(toolResults.toString(), hasValidTool);
-            messages.add(new MessageDTO(Role.USER, userFeedback));
+                    thisTurnUserQuestion, finalAnswer,
+                    false, "SPRING_AI_2_AUTO",
+                    agentMs, "ERROR", "model_output_blank");
+        } else {
+            finalAnswer = cleanupAnswer(modelOutput);
+            traceStore.recordDecision(sessionId, 1, "FINAL",
+                    null, null, null,
+                    thisTurnUserQuestion, finalAnswer,
+                    false, "SPRING_AI_2_AUTO",
+                    agentMs, "OK", null);
+            log.info("✅ Spring AI 2.0 自动 Agent 结束：总耗时 {}ms，最终回答长度={}", agentMs, finalAnswer.length());
         }
 
         if (finalAnswer.isEmpty()) {
-            finalAnswer = "⚠️ 已达到最大工具调用次数，请尝试简化问题。";
-            traceStore.recordDecision(sessionId, MAX_TOOL_CALLS, "FINAL",
-                    null, null, null,
-                    thisTurnUserQuestion, finalAnswer,
-                    false, null, null, "MAX_RETRY", null);
+            finalAnswer = "⚠️ 未能生成有效回答，请尝试简化问题。";
         }
 
         if (sessionId != null && !sessionId.isBlank()) {

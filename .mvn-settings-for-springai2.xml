@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+    <localRepository>${user.home}/.m2/repository</localRepository>
+
+    <mirrors>
+        <!-- 除了 Spring 官方包(io.spring.ai / org.springframework.ai) 外，其余都走阿里云 -->
+        <mirror>
+            <id>alimaven-all-except-spring-ai</id>
+            <mirrorOf>!spring-releases,central</mirrorOf>
+            <name>Aliyun Maven Mirror (exclude Spring AI 2.0)</name>
+            <url>https://maven.aliyun.com/repository/central</url>
+        </mirror>
+    </mirrors>
+
+    <profiles>
+        <profile>
+            <id>spring-ai-2</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <repositories>
+                <repository>
+                    <id>spring-releases</id>
+                    <url>https://repo.spring.io/release</url>
+                    <releases><enabled>true</enabled></releases>
+                    <snapshots><enabled>false</enabled></snapshots>
+                </repository>
+            </repositories>
+            <pluginRepositories>
+                <pluginRepository>
+                    <id>spring-releases</id>
+                    <url>https://repo.spring.io/release</url>
+                    <releases><enabled>true</enabled></releases>
+                    <snapshots><enabled>false</enabled></snapshots>
+                </pluginRepository>
+            </pluginRepositories>
+        </profile>
+    </profiles>
+
+</settings>

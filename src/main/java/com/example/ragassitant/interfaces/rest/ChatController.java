@@ -116,7 +116,7 @@ public class ChatController {
     public Map<String, Object> health() {
         return Map.of(
                 "status", "ok",
-                "model", "spring-ai-1.1.6 + ollama + rag + agent + ddd-4layer",
+                "model", "spring-ai-2.0.0 + ollama + rag + agent + ddd-4layer + bm25-hybrid",
                 "features", List.of("rag", "hybrid-search", "doc-version", "agent", "influxdb", "ddd-layers")
         );
     }
