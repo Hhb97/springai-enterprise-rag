@@ -22,6 +22,7 @@ public class HeuristicRouter {
     private static final Pattern MONTH_PATTERN = Pattern.compile("按月|每月|月度|月统计|月汇总");
     private static final Pattern QUARTER_PATTERN = Pattern.compile("按季|季度|每季度|季统计");
     private static final Pattern YEAR_PATTERN = Pattern.compile("按年|每年|年度|年统计|年汇总");
+    private static final Pattern FOLLOWUP_PATTERN = Pattern.compile("(^|\\s|,|，|。|呢|那|这个|那个|这个呢|那个呢|怎么样|如何|看下|看看|查下|查询下)[\\s]*$");
 
     public ToolCall route(String question) {
         if (question == null || question.isBlank()) return null;
@@ -88,6 +89,20 @@ public class HeuristicRouter {
             Map<String, Object> args = new LinkedHashMap<>();
             args.put("sn", sn);
             return new ToolCall("get_device_detail", args);
+        }
+
+        // ========== 兜底：有 SN 但上面都没命中 → 当作追答/省略式问句，默认查「近30天能耗」 ==========
+        // 场景：用户上一条问了"mv-008近30天能耗"，这条说"mv-003呢"/"mv-003"/"mv-003怎么样"
+        boolean looksLikeFollowup =
+                FOLLOWUP_PATTERN.matcher(q).find()
+                        || question.trim().equalsIgnoreCase(sn)
+                        || question.trim().replaceAll("\\s+", "").equalsIgnoreCase(sn + "呢")
+                        || question.trim().length() <= sn.length() + 6;
+        if (looksLikeFollowup) {
+            Map<String, Object> args = new LinkedHashMap<>();
+            args.put("sn", sn);
+            args.put("days", 30);
+            return new ToolCall("query_energy_by_days", args);
         }
 
         return null;

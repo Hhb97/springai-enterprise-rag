@@ -75,11 +75,35 @@ public class AgentAppService {
         List<MessageDTO> messages = new ArrayList<>();
         messages.add(new MessageDTO(Role.SYSTEM, promptBuilder.buildAgentSystemPrompt()));
 
+        List<Map.Entry<String, String>> history = Collections.emptyList();
         if (sessionId != null && !sessionId.isBlank()) {
-            List<Map.Entry<String, String>> history = conversationStorePort.getHistory(sessionId, MAX_HISTORY_PER_SESSION);
+            history = conversationStorePort.getHistory(sessionId, MAX_HISTORY_PER_SESSION);
             for (Map.Entry<String, String> pair : history) {
                 messages.add(new MessageDTO(Role.USER, pair.getKey()));
                 messages.add(new MessageDTO(Role.ASSISTANT, pair.getValue()));
+            }
+        }
+
+        // ===== 启发式路由的上下文补全：从最近历史用户问题继承 SN/天数 =====
+        ToolCall forcedTool = null;
+        if (ENABLE_HEURISTIC_ROUTE) {
+            forcedTool = heuristicRouter.route(question);
+            if (forcedTool == null && !history.isEmpty()) {
+                String lastUserQ = null;
+                for (int i = history.size() - 1; i >= 0; i--) {
+                    lastUserQ = history.get(i).getKey();
+                    if (lastUserQ != null && !lastUserQ.isBlank()) break;
+                }
+                if (lastUserQ != null) {
+                    String merged = question + " " + lastUserQ;
+                    ToolCall lastT = heuristicRouter.route(lastUserQ);
+                    ToolCall mergedT = heuristicRouter.route(merged);
+                    forcedTool = mergedT != null ? mergedT : lastT;
+                    if (forcedTool != null) {
+                        log.info("🧠 上下文补全触发：current='{}' 本身未命中，合并 lastUser='{}' → 命中工具 {}({})",
+                                question, lastUserQ, forcedTool.name, forcedTool.arguments);
+                    }
+                }
             }
         }
 
@@ -88,60 +112,57 @@ public class AgentAppService {
         List<ChatResponse.SourceDoc> sourceDocs = new ArrayList<>();
 
         // ===== 优化 1：启发式路由 FORCE_EXEC 提到 RAG 之前，纯工具类问题（列设备、查能耗）完全跳过向量检索 =====
-        if (ENABLE_HEURISTIC_ROUTE) {
-            ToolCall forcedTool = heuristicRouter.route(question);
-            if (forcedTool != null && HEURISTIC_STRATEGY == HeuristicStrategy.FORCE_EXEC) {
-                long toolStart = System.currentTimeMillis();
-                log.info("🎯[FORCE_EXEC] 启发式命中（先于 RAG）→ 强制调用工具 {}({})，跳过向量检索", forcedTool.name, forcedTool.arguments);
-                String forcedResult;
-                String toolErr = null;
-                try {
-                    forcedResult = toolRegistry.invoke(forcedTool);
-                } catch (Exception e) {
-                    forcedResult = null;
-                    toolErr = e.getMessage();
-                }
-                long toolMs = System.currentTimeMillis() - toolStart;
-                log.info("🎯[FORCE_EXEC] 工具 {} 执行完毕，结果长度={}", forcedTool.name, forcedResult == null ? 0 : forcedResult.length());
-                traceStore.recordDecision(sessionId, 1, "HEURISTIC_TOOL",
-                        forcedTool.name, forcedTool.arguments, forcedResult,
-                        null, null, true, "FORCE_EXEC",
-                        toolMs, toolErr == null ? "OK" : "ERROR", toolErr);
-
-                messages.add(new MessageDTO(Role.USER, question));
-                String argsJson;
-                try { argsJson = MAPPER.writeValueAsString(forcedTool.arguments); }
-                catch (Exception e) { argsJson = "{}"; }
-                messages.add(new MessageDTO(Role.ASSISTANT, "[{\"name\":\"" + forcedTool.name + "\",\"arguments\":" + argsJson + "}]"));
-                String userFeedback = promptBuilder.buildForcedToolExecutionFeedback(forcedResult);
-                messages.add(new MessageDTO(Role.USER, userFeedback));
-
-                long llmStart = System.currentTimeMillis();
-                String summary = callLLM(messages);
-                long llmMs = System.currentTimeMillis() - llmStart;
-                if (summary != null && !summary.isBlank()) {
-                    finalAnswer = cleanupAnswer(summary);
-                } else {
-                    finalAnswer = forcedResult == null ? "" : forcedResult;
-                }
-                traceStore.recordDecision(sessionId, 1, "LLM_SUMMARY",
-                        null, null, null,
-                        messages.size() + " messages", summary,
-                        true, "FORCE_EXEC",
-                        llmMs, "OK", null);
-                log.info("✅[FORCE_EXEC] 流程结束：LLM 总结结果长度={}", finalAnswer.length());
-
-                if (sessionId != null && !sessionId.isBlank()) {
-                    conversationStorePort.saveUser(sessionId, thisTurnUserQuestion);
-                    conversationStorePort.saveAssistant(sessionId, finalAnswer);
-                }
-                traceStore.recordDecision(sessionId, 1, "FINAL",
-                        null, null, null,
-                        thisTurnUserQuestion, finalAnswer,
-                        true, "FORCE_EXEC",
-                        null, "OK", null);
-                return new ChatResponse(finalAnswer, sourceDocs);
+        if (ENABLE_HEURISTIC_ROUTE && forcedTool != null && HEURISTIC_STRATEGY == HeuristicStrategy.FORCE_EXEC) {
+            long toolStart = System.currentTimeMillis();
+            log.info("🎯[FORCE_EXEC] 启发式命中（先于 RAG）→ 强制调用工具 {}({})，跳过向量检索", forcedTool.name, forcedTool.arguments);
+            String forcedResult;
+            String toolErr = null;
+            try {
+                forcedResult = toolRegistry.invoke(forcedTool);
+            } catch (Exception e) {
+                forcedResult = null;
+                toolErr = e.getMessage();
             }
+            long toolMs = System.currentTimeMillis() - toolStart;
+            log.info("🎯[FORCE_EXEC] 工具 {} 执行完毕，结果长度={}", forcedTool.name, forcedResult == null ? 0 : forcedResult.length());
+            traceStore.recordDecision(sessionId, 1, "HEURISTIC_TOOL",
+                    forcedTool.name, forcedTool.arguments, forcedResult,
+                    null, null, true, "FORCE_EXEC",
+                    toolMs, toolErr == null ? "OK" : "ERROR", toolErr);
+
+            messages.add(new MessageDTO(Role.USER, question));
+            String argsJson;
+            try { argsJson = MAPPER.writeValueAsString(forcedTool.arguments); }
+            catch (Exception e) { argsJson = "{}"; }
+            messages.add(new MessageDTO(Role.ASSISTANT, "[{\"name\":\"" + forcedTool.name + "\",\"arguments\":" + argsJson + "}]"));
+            String userFeedback = promptBuilder.buildForcedToolExecutionFeedback(forcedResult);
+            messages.add(new MessageDTO(Role.USER, userFeedback));
+
+            long llmStart = System.currentTimeMillis();
+            String summary = callLLM(messages);
+            long llmMs = System.currentTimeMillis() - llmStart;
+            if (summary != null && !summary.isBlank()) {
+                finalAnswer = cleanupAnswer(summary);
+            } else {
+                finalAnswer = forcedResult == null ? "" : forcedResult;
+            }
+            traceStore.recordDecision(sessionId, 1, "LLM_SUMMARY",
+                    null, null, null,
+                    messages.size() + " messages", summary,
+                    true, "FORCE_EXEC",
+                    llmMs, "OK", null);
+            log.info("✅[FORCE_EXEC] 流程结束：LLM 总结结果长度={}", finalAnswer.length());
+
+            if (sessionId != null && !sessionId.isBlank()) {
+                conversationStorePort.saveUser(sessionId, thisTurnUserQuestion);
+                conversationStorePort.saveAssistant(sessionId, finalAnswer);
+            }
+            traceStore.recordDecision(sessionId, 1, "FINAL",
+                    null, null, null,
+                    thisTurnUserQuestion, finalAnswer,
+                    true, "FORCE_EXEC",
+                    null, "OK", null);
+            return new ChatResponse(finalAnswer, sourceDocs);
         }
 
         // ===== RAG 检索：只在启发式没命中 FORCE_EXEC 时才执行，且包 try-catch（embedding 模型异常不阻断 Agent）=====
@@ -176,7 +197,6 @@ public class AgentAppService {
 
         // ===== 启发式路由 RECOMMEND_LLM / 未命中分支 =====
         if (ENABLE_HEURISTIC_ROUTE) {
-            ToolCall forcedTool = heuristicRouter.route(question);
             if (forcedTool != null) {
                 if (HEURISTIC_STRATEGY != HeuristicStrategy.FORCE_EXEC) {
                     log.info("💡[RECOMMEND_LLM] 启发式命中 → 推荐工具 {}({})（最终由 LLM 决定）", forcedTool.name, forcedTool.arguments);
