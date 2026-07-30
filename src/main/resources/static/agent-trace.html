@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent 决策追踪 - Spring AI</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: #f5f7fa;
+            min-height: 100vh;
+            color: #333;
+        }
+        .header {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            color: #fff;
+            padding: 16px 24px;
+            box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+        }
+        .header .nav { display: flex; align-items: center; gap: 24px; }
+        .header a { color: rgba(255,255,255,0.9); text-decoration: none; font-size: 14px; }
+        .header a.active { color: #fff; font-weight: 600; }
+        .header h1 { font-size: 18px; font-weight: 600; }
+
+        .container { padding: 24px; max-width: 1600px; margin: 0 auto; }
+
+        .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .stat-card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+            position: relative;
+            overflow: hidden;
+        }
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #6366f1, #8b5cf6);
+        }
+        .stat-card.green::before { background: linear-gradient(90deg, #10b981, #34d399); }
+        .stat-card.orange::before { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+        .stat-card.red::before { background: linear-gradient(90deg, #ef4444, #f87171); }
+        .stat-label { font-size: 12px; color: #888; margin-bottom: 8px; }
+        .stat-value { font-size: 28px; font-weight: 700; color: #1a1a1a; }
+        .stat-sub { font-size: 11px; color: #999; margin-top: 4px; }
+
+        .toolbar {
+            background: #fff;
+            border-radius: 12px;
+            padding: 16px 20px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+            margin-bottom: 24px;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .toolbar label { font-size: 13px; color: #555; }
+        .toolbar input, .toolbar select {
+            padding: 7px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 13px;
+            outline: none;
+        }
+        .toolbar input:focus, .toolbar select:focus { border-color: #6366f1; }
+        .toolbar input[type="text"] { min-width: 240px; }
+        .btn {
+            padding: 7px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+        .btn-primary { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); color: #fff; }
+        .btn-primary:hover { opacity: 0.9; }
+        .btn-ghost { background: #f3f4f6; color: #555; }
+        .btn-ghost:hover { background: #e5e7eb; }
+        .spacer { flex: 1; }
+
+        .layout { display: grid; grid-template-columns: 420px 1fr; gap: 24px; }
+        @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
+
+        .panel {
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+            overflow: hidden;
+        }
+        .panel-header {
+            padding: 14px 20px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #fafbfc;
+        }
+        .panel-header h3 { font-size: 14px; font-weight: 600; color: #1a1a1a; }
+        .panel-header .count-badge {
+            font-size: 11px;
+            background: #ede9fe;
+            color: #6366f1;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: 600;
+        }
+        .panel-body { padding: 16px 20px; max-height: calc(100vh - 360px); overflow-y: auto; }
+
+        .session-list { list-style: none; }
+        .session-item {
+            padding: 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 8px;
+            border: 1px solid transparent;
+            transition: all 0.15s;
+        }
+        .session-item:hover { background: #f9fafb; border-color: #e5e7eb; }
+        .session-item.active {
+            background: linear-gradient(135deg, #eef2ff 0%, #f5f3ff 100%);
+            border-color: #c7d2fe;
+        }
+        .session-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .session-id {
+            font-size: 12px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            color: #6366f1;
+            font-weight: 600;
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .session-time { font-size: 11px; color: #999; }
+        .session-stages {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+        }
+        .stage-chip {
+            font-size: 10px;
+            padding: 2px 7px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .stage-FINAL { background: #dcfce7; color: #166534; }
+        .stage-HEURISTIC_TOOL { background: #fef3c7; color: #92400e; }
+        .stage-LLM_SUMMARY { background: #e0e7ff; color: #3730a3; }
+        .stage-LLM_AGENT_AUTO_LOOP_START { background: #fce7f3; color: #9d174d; }
+        .stage-TOOL { background: #dbeafe; color: #1e40af; }
+        .stage-default { background: #f3f4f6; color: #374151; }
+
+        .session-summary { font-size: 12px; color: #666; margin-top: 6px; line-height: 1.5; }
+        .session-dur { font-size: 11px; color: #10b981; font-weight: 600; }
+        .session-dur.err { color: #ef4444; }
+
+        .timeline { position: relative; padding-left: 28px; }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 10px;
+            top: 6px;
+            bottom: 6px;
+            width: 2px;
+            background: #e5e7eb;
+        }
+        .trace-node { position: relative; margin-bottom: 18px; }
+        .trace-node::before {
+            content: '';
+            position: absolute;
+            left: -24px;
+            top: 18px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #fff;
+            border: 2px solid #6366f1;
+            z-index: 1;
+        }
+        .trace-node.ERR::before { border-color: #ef4444; background: #fef2f2; }
+        .trace-node.FINAL::before { border-color: #10b981; background: #dcfce7; }
+        .trace-node.HEURISTIC_TOOL::before { border-color: #f59e0b; background: #fffbeb; }
+
+        .trace-card {
+            background: #fafbfc;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            padding: 14px 16px;
+        }
+        .trace-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
+        .trace-stage-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 3px 10px;
+            border-radius: 6px;
+        }
+        .trace-stage-badge.s-HEURISTIC_TOOL { background: #fef3c7; color: #92400e; }
+        .trace-stage-badge.s-LLM_SUMMARY { background: #e0e7ff; color: #3730a3; }
+        .trace-stage-badge.s-FINAL { background: #dcfce7; color: #166534; }
+        .trace-stage-badge.s-LLM_AGENT_AUTO_LOOP_START { background: #fce7f3; color: #9d174d; }
+        .trace-stage-badge.s-TOOL { background: #dbeafe; color: #1e40af; }
+        .trace-stage-badge.s-default { background: #f3f4f6; color: #374151; }
+
+        .trace-meta { font-size: 11px; color: #888; display: flex; gap: 12px; flex-wrap: wrap; }
+        .trace-meta span b { color: #444; font-weight: 600; }
+        .tool-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            background: #eff6ff;
+            border-left: 3px solid #3b82f6;
+            border-radius: 4px;
+            margin: 8px 0;
+            font-size: 12px;
+        }
+        .tool-row .tool-name { font-weight: 700; color: #1e40af; }
+        .heuristic-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            background: #fffbeb;
+            border-left: 3px solid #f59e0b;
+            border-radius: 4px;
+            margin: 8px 0;
+            font-size: 12px;
+        }
+        .heuristic-row b { color: #92400e; }
+        .status-ok { color: #10b981; font-weight: 600; }
+        .status-err { color: #ef4444; font-weight: 600; }
+        .dur-pill {
+            display: inline-block;
+            padding: 2px 8px;
+            background: #ecfdf5;
+            color: #047857;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .dur-pill.slow { background: #fef2f2; color: #b91c1c; }
+        .section-label {
+            font-size: 11px;
+            font-weight: 700;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 10px 0 6px;
+            padding-bottom: 3px;
+            border-bottom: 1px dashed #e5e7eb;
+        }
+        .code-block {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 12px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            line-height: 1.6;
+            overflow-x: auto;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .empty-state {
+            padding: 60px 20px;
+            text-align: center;
+            color: #999;
+        }
+        .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+        .empty-state p { font-size: 14px; }
+        .tag {
+            display: inline-block;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .tag-force { background: #fef3c7; color: #92400e; }
+        .tag-llm { background: #e0e7ff; color: #3730a3; }
+        .loading {
+            display: inline-block;
+            width: 14px; height: 14px;
+            border: 2px solid #c7d2fe;
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .error-box {
+            padding: 10px 12px;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #b91c1c;
+            border-radius: 6px;
+            font-size: 12px;
+            margin-top: 8px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="nav">
+            <h1>🔍 Agent 决策追踪</h1>
+            <div style="margin-left: auto; display: flex; gap: 24px;">
+                <a href="/">💬 聊天</a>
+                <a href="/docs.html">📁 知识库</a>
+                <a href="/agent-trace.html" class="active">🔍 Agent 追踪</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="stat-label">📊 过去 24 小时决策数</div>
+                <div class="stat-value" id="stat24h">--</div>
+                <div class="stat-sub">包含所有阶段（工具调用/LLM总结/FINAL）</div>
+            </div>
+            <div class="stat-card green">
+                <div class="stat-label">📈 过去 7 天决策数</div>
+                <div class="stat-value" id="stat7d">--</div>
+                <div class="stat-sub">总计决策链路记录条数</div>
+            </div>
+            <div class="stat-card orange">
+                <div class="stat-label">💡 启发式路由命中率</div>
+                <div class="stat-value" id="statHitRate">--%</div>
+                <div class="stat-sub">FORCE_EXEC 跳过 LLM 的比例</div>
+            </div>
+            <div class="stat-card red">
+                <div class="stat-label">⚠️ 错误率</div>
+                <div class="stat-value" id="statErrRate">--%</div>
+                <div class="stat-sub">最近 50 条记录中的 ERROR 占比</div>
+            </div>
+        </div>
+
+        <div class="toolbar">
+            <label>🔎 搜索 SessionID：</label>
+            <input type="text" id="searchSession" placeholder="输入或粘贴 session-xxx 模糊搜索...">
+            <label>📋 最近条数：</label>
+            <select id="limitSel">
+                <option value="20">20 条</option>
+                <option value="50" selected>50 条</option>
+                <option value="100">100 条</option>
+                <option value="200">200 条</option>
+            </select>
+            <button class="btn btn-primary" onclick="loadRecent()">🔄 刷新列表</button>
+            <div class="spacer"></div>
+            <button class="btn btn-ghost" onclick="loadRecent()">⏱ 自动刷新</button>
+        </div>
+
+        <div class="layout">
+            <div class="panel">
+                <div class="panel-header">
+                    <h3>🗂 会话列表</h3>
+                    <span class="count-badge" id="sessionCount">0</span>
+                </div>
+                <div class="panel-body" id="sessionList">
+                    <div class="empty-state"><div class="icon">⌛</div><p>正在加载会话列表...</p></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h3 id="detailTitle">🔗 决策链路时间轴</h3>
+                    <span class="count-badge" id="detailCount">请选择左侧会话</span>
+                </div>
+                <div class="panel-body" id="traceDetail">
+                    <div class="empty-state">
+                        <div class="icon">👈</div>
+                        <p>请在左侧选择一个会话<br>查看完整的 Agent 决策链路</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allTraces = [];
+        let activeSessionId = null;
+        let sessions = new Map();
+
+        function stageClass(stage) {
+            const map = {FINAL:'FINAL', HEURISTIC_TOOL:'HEURISTIC_TOOL', LLM_SUMMARY:'LLM_SUMMARY', LLM_AGENT_AUTO_LOOP_START:'LLM_AGENT_AUTO_LOOP_START', TOOL:'TOOL'};
+            return map[stage] || 'default';
+        }
+        function stageBadgeClass(stage) {
+            const map = {FINAL:'s-FINAL', HEURISTIC_TOOL:'s-HEURISTIC_TOOL', LLM_SUMMARY:'s-LLM_SUMMARY', LLM_AGENT_AUTO_LOOP_START:'s-LLM_AGENT_AUTO_LOOP_START', TOOL:'s-TOOL'};
+            return map[stage] || 's-default';
+        }
+        function stageIcon(stage) {
+            const map = {FINAL:'✅', HEURISTIC_TOOL:'🎯', LLM_SUMMARY:'📝', LLM_AGENT_AUTO_LOOP_START:'🔁', TOOL:'🔧'};
+            return map[stage] || '🔹';
+        }
+        function stageName(stage) {
+            const map = {
+                FINAL:'最终回答产出',
+                HEURISTIC_TOOL:'启发式工具调用(FORCE_EXEC)',
+                LLM_SUMMARY:'LLM 总结回答',
+                LLM_AGENT_AUTO_LOOP_START:'Spring AI 2.0 自动 Tool Calling 启动',
+                TOOL:'工具执行'
+            };
+            return map[stage] || stage;
+        }
+        function formatJsonSafe(str) {
+            if (!str) return '—';
+            try {
+                if (/^[\[{]/.test(str.trim())) return JSON.stringify(JSON.parse(str), null, 2);
+            } catch (_) {}
+            return str;
+        }
+        function fmtTime(iso) {
+            if (!iso) return '';
+            const t = new Date(iso);
+            if (isNaN(t)) return iso;
+            const pad = n => String(n).padStart(2, '0');
+            return `${t.getMonth()+1}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;
+        }
+        function fmtDur(ms) {
+            if (ms == null) return '—';
+            if (ms < 1000) return ms + ' ms';
+            return (ms/1000).toFixed(2) + ' s';
+        }
+
+        async function loadStats() {
+            try {
+                const r = await fetch('/api/agent/traces/stats').then(r => r.json());
+                if (r && r.data) {
+                    document.getElementById('stat24h').textContent = r.data.last24hCount ?? '--';
+                    document.getElementById('stat7d').textContent = r.data.last7dCount ?? '--';
+                }
+            } catch (e) { console.warn(e); }
+        }
+
+        async function loadRecent() {
+            const listEl = document.getElementById('sessionList');
+            const limit = parseInt(document.getElementById('limitSel').value);
+            listEl.innerHTML = `<div class="empty-state"><div class="icon"><span class="loading"></span></div><p>正在加载最近 ${limit} 条记录...</p></div>`;
+
+            try {
+                const r = await fetch(`/api/agent/traces/recent?limit=${limit}`).then(r => r.json());
+                allTraces = (r && r.data) ? r.data : [];
+
+                let errCnt = 0, hitCnt = 0, hitTotal = 0;
+                sessions = new Map();
+                for (const t of allTraces) {
+                    if (t.status === 'ERROR') errCnt++;
+                    if (t.stage === 'HEURISTIC_TOOL' || t.stage === 'LLM_AGENT_AUTO_LOOP_START') {
+                        hitTotal++;
+                        if (t.heuristicHit) hitCnt++;
+                    }
+                    if (!sessions.has(t.sessionId)) sessions.set(t.sessionId, []);
+                    sessions.get(t.sessionId).push(t);
+                }
+                const total = allTraces.length;
+                document.getElementById('statErrRate').textContent = total ? ((errCnt/total)*100).toFixed(1)+'%' : '0%';
+                document.getElementById('statHitRate').textContent = hitTotal ? ((hitCnt/hitTotal)*100).toFixed(1)+'%' : '—';
+
+                renderSessionList();
+            } catch (e) {
+                listEl.innerHTML = `<div class="empty-state"><div class="icon">❌</div><p>加载失败：${e.message}<br>请确认后端服务已启动</p></div>`;
+            }
+        }
+
+        function renderSessionList() {
+            const listEl = document.getElementById('sessionList');
+            const kw = (document.getElementById('searchSession').value || '').trim().toLowerCase();
+            const sessionIds = [...sessions.keys()].filter(id => {
+                if (!kw) return true;
+                if (id.toLowerCase().includes(kw)) return true;
+                const traces = sessions.get(id);
+                return traces.some(t => JSON.stringify(t).toLowerCase().includes(kw));
+            });
+
+            document.getElementById('sessionCount').textContent = sessionIds.length;
+
+            if (sessionIds.length === 0) {
+                listEl.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>${kw ? '没有匹配的会话：' + kw : '暂无会话记录<br>尝试在聊天页调用 Agent 功能'}</p></div>`;
+                return;
+            }
+
+            sessionIds.sort((a,b) => {
+                const la = sessions.get(a)[0]?.createdAt || '';
+                const lb = sessions.get(b)[0]?.createdAt || '';
+                return lb.localeCompare(la);
+            });
+
+            let html = `<ul class="session-list">`;
+            for (const sid of sessionIds) {
+                const traces = sessions.get(sid);
+                traces.sort((a,b) => (a.createdAt||'').localeCompare(b.createdAt||''));
+                const finalTrace = traces.find(t => t.stage === 'FINAL');
+                const first = traces[0];
+                const stages = [...new Set(traces.map(t => t.stage))];
+                const hasErr = traces.some(t => t.status === 'ERROR');
+                const totalMs = traces.reduce((s,t) => s + (t.durationMs || 0), 0);
+                const activeCls = activeSessionId === sid ? 'active' : '';
+                const shortSid = sid.length > 24 ? sid.slice(0,20)+'...' : sid;
+
+                html += `<li class="session-item ${activeCls}" onclick="showSession('${sid}')">
+                    <div class="session-meta">
+                        <span class="session-id" title="${sid}">${shortSid}</span>
+                        <span class="session-time">${fmtTime(first?.createdAt)}</span>
+                    </div>
+                    <div class="session-stages">
+                        ${stages.map(s => `<span class="stage-chip stage-${stageClass(s)}">${stageIcon(s)} ${s}</span>`).join('')}
+                    </div>
+                    <div class="session-summary">
+                        共 <b>${traces.length}</b> 个决策节点 ·
+                        <span class="session-dur ${hasErr?'err':''}">${fmtDur(totalMs)}</span>
+                        ${hasErr ? ' · <span class="status-err">⚠️ 有错误</span>' : ''}
+                        ${finalTrace ? ' · 已完成' : ''}
+                    </div>
+                </li>`;
+            }
+            html += '</ul>';
+            listEl.innerHTML = html;
+        }
+
+        async function showSession(sid) {
+            activeSessionId = sid;
+            renderSessionList();
+
+            let traces;
+            if (sessions.has(sid)) {
+                traces = sessions.get(sid).slice();
+            } else {
+                try {
+                    const r = await fetch(`/api/agent/traces/session/${sid}`).then(r => r.json());
+                    traces = (r && r.data) ? r.data : [];
+                } catch(e) { traces = []; }
+            }
+            traces.sort((a,b) => (a.createdAt||'').localeCompare(b.createdAt||''));
+            document.getElementById('detailTitle').textContent = `🔗 决策链路：${sid}`;
+            document.getElementById('detailCount').textContent = `${traces.length} 个节点`;
+
+            const el = document.getElementById('traceDetail');
+            if (traces.length === 0) {
+                el.innerHTML = `<div class="empty-state"><div class="icon">😶</div><p>该会话没有记录任何决策信息</p></div>`;
+                return;
+            }
+
+            let html = `<div class="timeline">`;
+            for (let i = 0; i < traces.length; i++) {
+                const t = traces[i];
+                const cls = stageClass(t.stage);
+                const errCls = t.status === 'ERROR' ? 'ERR' : '';
+                const durCls = (t.durationMs || 0) > 10000 ? 'slow' : '';
+
+                html += `<div class="trace-node ${cls} ${errCls}">
+                    <div class="trace-card">
+                        <div class="trace-head">
+                            <span class="trace-stage-badge ${stageBadgeClass(t.stage)}">
+                                ${stageIcon(t.stage)} ${stageName(t.stage)}
+                            </span>
+                            <div class="trace-meta">
+                                <span><b>#${i+1}</b> · 第 ${t.roundNo || 1} 轮</span>
+                                <span>⏰ ${fmtTime(t.createdAt)}</span>
+                                ${t.durationMs != null ? `<span class="dur-pill ${durCls}">⏱ ${fmtDur(t.durationMs)}</span>` : ''}
+                                ${t.status === 'ERROR' ? `<span class="status-err">❌ 失败</span>` : `<span class="status-ok">✓ OK</span>`}
+                            </div>
+                        </div>`;
+
+                if (t.heuristicStrategy) {
+                    html += `<div class="heuristic-row">
+                        💡 启发式策略：<b>${t.heuristicStrategy}</b>
+                        ${t.heuristicHit ? ' · 命中 ✅' : ' · 未命中'}
+                        <span class="tag ${t.heuristicStrategy==='FORCE_EXEC'?'tag-force':'tag-llm'}">${t.heuristicStrategy}</span>
+                    </div>`;
+                }
+
+                if (t.toolName) {
+                    html += `<div class="tool-row">
+                        🔧 调用工具：<span class="tool-name">${t.toolName}</span>
+                    </div>`;
+                }
+
+                if (t.toolArguments && t.toolArguments !== '{}' && t.toolArguments !== 'null') {
+                    html += `<div class="section-label">📥 工具入参 (toolArguments)</div>
+                        <div class="code-block">${formatJsonSafe(t.toolArguments)}</div>`;
+                }
+
+                if (t.llmInput && t.llmInput.length > 10) {
+                    html += `<div class="section-label">💬 LLM 输入上下文 (${t.llmInput.length} chars)</div>
+                        <div class="code-block">${escapeHtml(t.llmInput)}</div>`;
+                }
+
+                if (t.llmOutput && t.llmOutput.length > 10) {
+                    html += `<div class="section-label">🤖 LLM 输出 (${t.llmOutput.length} chars)</div>
+                        <div class="code-block">${escapeHtml(t.llmOutput)}</div>`;
+                }
+
+                if (t.errorMessage) {
+                    html += `<div class="section-label">❌ 错误信息</div>
+                        <div class="error-box">${escapeHtml(t.errorMessage)}</div>`;
+                }
+
+                if (t.toolResult && t.toolResult.length > 5) {
+                    html += `<div class="section-label">📤 工具执行结果 (${t.toolResult.length} chars)</div>
+                        <div class="code-block">${formatJsonSafe(t.toolResult)}</div>`;
+                }
+
+                html += `</div></div>`;
+            }
+            html += `</div>`;
+            el.innerHTML = html;
+        }
+
+        function escapeHtml(s) {
+            if (!s) return '';
+            const div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+
+        document.getElementById('searchSession').addEventListener('input', renderSessionList);
+        document.getElementById('limitSel').addEventListener('change', loadRecent);
+
+        loadStats();
+        loadRecent();
+    </script>
+</body>
+</html>

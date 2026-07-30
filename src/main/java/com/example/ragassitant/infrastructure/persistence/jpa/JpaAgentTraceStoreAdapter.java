@@ -81,6 +81,9 @@ public class JpaAgentTraceStoreAdapter implements AgentTraceStorePort {
             m.put("stage", e.getStage());
             m.put("toolName", e.getToolName());
             m.put("toolArguments", e.getToolArguments());
+            m.put("toolResult", e.getToolResult());
+            m.put("llmInput", e.getLlmInput());
+            m.put("llmOutput", e.getLlmOutput());
             m.put("heuristicHit", e.getHeuristicHit());
             m.put("heuristicStrategy", e.getHeuristicStrategy());
             m.put("durationMs", e.getDurationMs());
