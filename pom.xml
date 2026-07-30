@@ -59,6 +59,12 @@
             <artifactId>spring-ai-starter-model-ollama</artifactId>
         </dependency>
 
+        <!-- Spring AI OpenAI 兼容接口（用于对接阿里云百炼 DashScope / 月之暗面 / DeepSeek 等） -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
+        </dependency>
+
         <!-- Spring AI RAG 模块 (BM25Retriever, EnsembleRetriever 等高级检索) -->
         <dependency>
             <groupId>org.springframework.ai</groupId>

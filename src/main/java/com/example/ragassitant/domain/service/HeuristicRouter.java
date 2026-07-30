@@ -24,6 +24,55 @@ public class HeuristicRouter {
     private static final Pattern YEAR_PATTERN = Pattern.compile("按年|每年|年度|年统计|年汇总");
     private static final Pattern FOLLOWUP_PATTERN = Pattern.compile("(^|\\s|,|，|。|呢|那|这个|那个|这个呢|那个呢|怎么样|如何|看下|看看|查下|查询下)[\\s]*$");
 
+    // ========== 工具话题关键词：出现任何一个，才算「在聊运维/设备/能耗」，才有资格进补全 ==========
+    // （上一条历史命中了工具，当前问题如果完全不沾这些词，说明用户已经换话题了，不能补全）
+    private static final Pattern TOOL_TOPIC_WORD_PATTERN = Pattern.compile(
+            "设备|能耗|用电|电量|kwh|电度|数据|趋势|曲线|详情|详细信息|清单|列表|聚合|汇总|统计|合计|月度|月度|季度|年度|周|天|日|近半年|半年|6个月|sn|编号|号|机组|" +
+            "mv-|wzh_|呢|怎么样|如何|看下|看看|查下|查询下|这个|那个|它|那台|这台|上面那个|之前那个|刚才那个|同样|一样|换成|换成的|换个|另外|" +
+            // 工具名本身的同义词（历史刚被调用过工具名，用户说「XX呢」才算追同话题）
+            "能耗|设备|详情|清单");
+
+    // ========== 反模式：命中这些=明确换话题/闲聊/通用问答，直接拒绝补全 ==========
+    //  优先级比 TOOL_TOPIC 更高
+    private static final Pattern TOPIC_SWITCH_CHAT_PATTERN = Pattern.compile(
+            // 纯闲聊问候
+            "^\\s*(你好|您好|hi|hello|嗨|在吗|在不在|你是谁|介绍下|自我介绍|你是什么|你叫什么|你是什么大?模型|你用什么模型|基于什么模型|你能做什么|你会什么|有什么功能|功能介绍|你能干嘛|谢谢|感谢|好的|ok|收到|明白|了解|行|可以|不错|真棒|厉害|哈哈|嘿嘿)\\s*[!！?？。.]*\\s*$|" +
+            // 关于 AI 本身的身份/能力问题（不是运维话题）
+            "(你是什么大?模型|用什么模型训练|基于什么模型|模型是什么|你是gpt|你是qwen|你是ollama|你是通义|你是什么公司|你是谁开发的|你多大|你是男是女|你住哪|你的名字|你有感情吗|你有意识吗)|" +
+            // 明确切换话题的指示词
+            "(换个话题|聊点别的|不说这个|不聊这个|问你个别的|另外|还有|顺便问下|对了还有|我想问下[^设备^能耗^数据]|想知道[^设备^能耗^数据]|解释下什么是|什么叫|怎么理解|定义是什么)");
+
+    /**
+     * 判断当前问题是否看起来「还是在聊工具相关话题」
+     * 规则：先过 反模式（命中=换话题=false），再过 工具词匹配（命中=true）
+     */
+    public boolean isLikelySameToolTopic(String currentQuestion, String lastUserQuestion) {
+        if (currentQuestion == null || currentQuestion.isBlank()) return false;
+        String q = currentQuestion.toLowerCase(Locale.ROOT);
+
+        // 1. 先命中「明确换话题」→ 直接判 false
+        if (TOPIC_SWITCH_CHAT_PATTERN.matcher(q).find()) {
+            return false;
+        }
+
+        // 2. 命中工具话题词 → true
+        if (TOOL_TOPIC_WORD_PATTERN.matcher(q).find()) {
+            return true;
+        }
+
+        // 3. 没命中但字数非常短（≤4个字符），可能是纯代词追答，需要看历史是否工具调用来决策
+        //    比如 "mv-003" "呢" 这些 TOOL_TOPIC 已经包含在上面了，这里基本不会到
+        //    兜底：如果字数<=2 且 历史上条是能耗/设备查询 → 放行，宁可小误判也不拦
+        if (currentQuestion.strip().length() <= 2) {
+            String last = lastUserQuestion == null ? "" : lastUserQuestion.toLowerCase(Locale.ROOT);
+            if (ENERGY_WORD_PATTERN.matcher(last).find() || SN_PATTERN.matcher(last).find() || DEVICE_LIST_WORD_PATTERN.matcher(last).find()) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public ToolCall route(String question) {
         if (question == null || question.isBlank()) return null;
         String q = question.toLowerCase(Locale.ROOT);

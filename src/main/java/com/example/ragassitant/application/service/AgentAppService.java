@@ -88,21 +88,32 @@ public class AgentAppService {
         ToolCall forcedTool = null;
         if (ENABLE_HEURISTIC_ROUTE) {
             forcedTool = heuristicRouter.route(question);
+            String lastUserQ = null;
             if (forcedTool == null && !history.isEmpty()) {
-                String lastUserQ = null;
                 for (int i = history.size() - 1; i >= 0; i--) {
                     lastUserQ = history.get(i).getKey();
                     if (lastUserQ != null && !lastUserQ.isBlank()) break;
                 }
-                if (lastUserQ != null) {
-                    String merged = question + " " + lastUserQ;
-                    ToolCall lastT = heuristicRouter.route(lastUserQ);
-                    ToolCall mergedT = heuristicRouter.route(merged);
-                    forcedTool = mergedT != null ? mergedT : lastT;
-                    if (forcedTool != null) {
-                        log.info("🧠 上下文补全触发：current='{}' 本身未命中，合并 lastUser='{}' → 命中工具 {}({})",
-                                question, lastUserQ, forcedTool.name, forcedTool.arguments);
-                    }
+            }
+            // ===== 【关键修复】上下文补全前置门禁：话题切换检测 =====
+            // 1. 当前问题本身没命中启发式
+            // 2. 且看起来和「设备/能耗/工具」完全不沾边（比如 "你是什么大模型" "你好"）
+            //    → 直接跳过补全，不继承上次的 SN/能耗工具，避免换话题后还去查能耗
+            boolean skipContextCompletion = false;
+            if (forcedTool == null && lastUserQ != null &&
+                !heuristicRouter.isLikelySameToolTopic(question, lastUserQ)) {
+                skipContextCompletion = true;
+                log.info("🚫 上下文补全被跳过：检测到换话题/闲聊 → current='{}' 已不在工具话题，不继承 lastUser='{}' 的 SN/工具",
+                        question, lastUserQ);
+            }
+            if (forcedTool == null && lastUserQ != null && !skipContextCompletion) {
+                String merged = question + " " + lastUserQ;
+                ToolCall lastT = heuristicRouter.route(lastUserQ);
+                ToolCall mergedT = heuristicRouter.route(merged);
+                forcedTool = mergedT != null ? mergedT : lastT;
+                if (forcedTool != null) {
+                    log.info("🧠 上下文补全触发：current='{}' 本身未命中，合并 lastUser='{}' → 命中工具 {}({})",
+                            question, lastUserQ, forcedTool.name, forcedTool.arguments);
                 }
             }
         }
