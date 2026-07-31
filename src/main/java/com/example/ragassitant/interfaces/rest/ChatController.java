@@ -34,7 +34,8 @@ public class ChatController {
             Map<String, Object> result = ragAppService.askWithOptions(
                     request.getQuestion(),
                     request.getEnableHybridSearch(),
-                    request.getTopK()
+                    request.getTopK(),
+                    request.getSessionId()
             );
             String answer = (String) result.get("answer");
             @SuppressWarnings("unchecked")

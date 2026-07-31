@@ -3,6 +3,7 @@ package com.example.ragassitant.application.service;
 import com.example.ragassitant.domain.model.DocumentChunk;
 import com.example.ragassitant.domain.model.RagAnswer;
 import com.example.ragassitant.domain.service.PromptBuilder;
+import com.example.ragassitant.domain.spi.ConversationStorePort;
 import com.example.ragassitant.domain.spi.LlmPort;
 import com.example.ragassitant.domain.spi.VectorStorePort;
 import jakarta.annotation.PostConstruct;
@@ -28,6 +29,8 @@ public class RagAppService {
     private final VectorStorePort vectorStorePort;
     private final VectorStore springAiVectorStore;
     private final PromptBuilder promptBuilder;
+    private final QueryRewriteService queryRewriteService;
+    private final ConversationStorePort conversationStorePort;
     private final int topK;
     private final double keywordWeight;
     private final double vectorWeight;
@@ -38,6 +41,8 @@ public class RagAppService {
                          VectorStorePort vectorStorePort,
                          VectorStore springAiVectorStore,
                          PromptBuilder promptBuilder,
+                         QueryRewriteService queryRewriteService,
+                         ConversationStorePort conversationStorePort,
                          @Value("${rag.top-k:3}") int topK,
                          @Value("${rag.hybrid-search.keyword-weight:0.3}") double keywordWeight,
                          @Value("${rag.hybrid-search.vector-weight:0.7}") double vectorWeight) {
@@ -45,6 +50,8 @@ public class RagAppService {
         this.vectorStorePort = vectorStorePort;
         this.springAiVectorStore = springAiVectorStore;
         this.promptBuilder = promptBuilder;
+        this.queryRewriteService = queryRewriteService;
+        this.conversationStorePort = conversationStorePort;
         this.topK = topK;
         this.keywordWeight = keywordWeight;
         this.vectorWeight = vectorWeight;
@@ -77,17 +84,34 @@ public class RagAppService {
     }
 
     public Map<String, Object> ask(String question) {
-        return askWithOptions(question, null, null);
+        return askWithOptions(question, null, null, null);
     }
 
     public Map<String, Object> askWithOptions(String question, Boolean enableHybridSearch, Integer customTopK) {
+        return askWithOptions(question, enableHybridSearch, customTopK, null);
+    }
+
+    /**
+     * @param sessionId 用于多轮指代消解；为空则跳过 Query 改写，行为与单轮一致
+     */
+    public Map<String, Object> askWithOptions(String question, Boolean enableHybridSearch,
+                                              Integer customTopK, String sessionId) {
         log.info("🔵 收到问题: {}", question);
         long start = System.currentTimeMillis();
 
         int effectiveTopK = customTopK != null ? customTopK : topK;
         boolean useHybrid = enableHybridSearch != null ? enableHybridSearch : true;
 
-        List<DocumentChunk> docs = useHybrid ? hybridSearch(question, effectiveTopK) : vectorSearch(question, effectiveTopK);
+        // 检索用改写后的 query；送给 LLM 的仍是用户原话
+        String retrievalQuery = question;
+        if (sessionId != null && !sessionId.isBlank()) {
+            retrievalQuery = queryRewriteService.rewrite(
+                    question, conversationStorePort.getHistory(sessionId, 10), sessionId).get(0);
+        }
+
+        List<DocumentChunk> docs = useHybrid
+                ? hybridSearch(retrievalQuery, effectiveTopK)
+                : vectorSearch(retrievalQuery, effectiveTopK);
 
         log.info("🔵 检索到 {} 个相关文档块", docs.size());
         for (int i = 0; i < docs.size(); i++) {

@@ -1,6 +1,16 @@
 ﻿server:
   port: 8900
 
+# === 日志格式：TraceId 来自 TraceIdFilter（MDC traceId），排查链路不用靠时间戳对日志 ===
+#  - [%X{traceId}]：MDC 里的 traceId，空值时输出 [] 不影响格式对齐
+#  - 其他字段顺序按生产常见：时间 → 线程 → traceId → 级别 → logger(36字符截断) → 消息
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [traceId=%X{traceId:-}] %-5level %logger{36} - %msg%n"
+  level:
+    # Spring AI 内部 Tool Calling 循环日志很有用，INFO 级别可以看到每轮 LLM 决策
+    root: INFO
+
 spring:
   application:
     name: rag-assistant
@@ -61,7 +71,7 @@ spring:
     # 控制台：https://bailian.console.aliyun.com/
     # 创建 API Key 后填入，或通过环境变量 DASHSCOPE_API_KEY 注入
     openai:
-      api-key: ${DASHSCOPE_API_KEY:sk-ws-H.ENbuTAWSMqSmhlDRQ}
+      api-key: ${DASHSCOPE_API_KEY:sk-ws-H.EIYELHP.wgbf.MEYCIQD62sIFEbwzt7Q55U1ZBTrCOvXxGhYGNU5Zndzpv34CdgIhAK6tEgcWTRFQbSph3BC5qKqNiu_TNbuTAWSMqSmhlDRQ}
       base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
       # DashScope 聊天模型（任选其一）：
       #   qwen-plus          通义千问 Plus（性价比高，推荐）
@@ -86,6 +96,42 @@ rag:
   hybrid-search:
     keyword-weight: 0.3
     vector-weight: 0.7
+
+  # === 文档切分（改这里后必须跑一次 POST /ai/ingest 全量重建向量库）===
+  chunking:
+    # 按「字符数」而非 token 计量：cl100k_base 与 nomic-embed-text 分词对不上，中文误差大
+    chunk-size-chars: 600
+    # 约 15% 重叠，避免跨块语义被切断；实际会被收紧到不超过 chunk-size 的一半
+    overlap-chars: 90
+    # 小于此长度的碎片丢弃（整篇仅一块时不受此限制，避免短文档被整篇丢掉）
+    min-chunk-chars: 50
+    # 入库文本前置「【章节: A > B > C】」。只注入章节路径、不注入文件名——
+    # 文件名对语义无贡献却会让同一文档的所有 chunk 向量高度趋同。关掉可做 A/B 对比。
+    inject-heading-prefix: true
+    # Markdown 小节合并屏障：不跨该层级及以上的标题合并（1=不跨 h1，2=不跨 h2，0=不限制）。
+    # Markdown 按标题逐节解析，不合并的话几十字的小节会各自成块，chunk-size 预算用不上。
+    merge-barrier-level: 1
+
+  # === Query 改写：把多轮里的省略/指代问句还原成可独立检索的完整问句 ===
+  # 产物只用于检索，送给 LLM 的对话消息始终是用户原话。
+  query-rewrite:
+    enabled: true
+    # 独立于 spring.ai.chat-backend：指代消解对 1.5b 小模型偏吃力，改写跑偏反而让检索更差；
+    # 而它在问答主链路上，本地小模型还要额外付 1~3s 推理延迟。取值 dashscope / openai / ollama。
+    # 目标后端不可用时自动降级到主聊天模型，不会导致启动失败。
+    backend: ${REWRITE_BACKEND:dashscope}
+    # 改写模型必须和 backend 匹配。留空 = 沿用后端默认模型。
+    # 【必须显式指定的原因】主对话默认的 qwen3.7-flash 是推理模型：改写「那结算周期呢」这种
+    # 机械任务也会先思考一轮（实测 reasoning_tokens=145），必然撞上 3s 超时，
+    # 而且思维链会混进输出污染改写结果。改写要的是快且不发挥，非推理模型才对。
+    # 实测同一 prompt：qwen-turbo 0.47s / qwen-flash 0.69s / qwen-plus 1.10s，均无思考 token。
+    model: ${REWRITE_MODEL:qwen-turbo}
+    # 超时后静默回退原问题，绝不阻断主流程
+    timeout-ms: 3000
+    # 只喂最近 N 轮，喂太多历史会把改写带偏到旧话题
+    max-history-pairs: 3
+    # 改写结果超过原问题这个倍数 → 判定模型在扩写或直接作答了，回退原问题
+    max-length-ratio: 3.0
 
 # Spring AI 2.0 Agent 相关配置（预留）
 agent:

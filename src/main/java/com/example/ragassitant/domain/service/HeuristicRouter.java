@@ -22,15 +22,26 @@ public class HeuristicRouter {
     private static final Pattern MONTH_PATTERN = Pattern.compile("按月|每月|月度|月统计|月汇总");
     private static final Pattern QUARTER_PATTERN = Pattern.compile("按季|季度|每季度|季统计");
     private static final Pattern YEAR_PATTERN = Pattern.compile("按年|每年|年度|年统计|年汇总");
-    private static final Pattern FOLLOWUP_PATTERN = Pattern.compile("(^|\\s|,|，|。|呢|那|这个|那个|这个呢|那个呢|怎么样|如何|看下|看看|查下|查询下)[\\s]*$");
+    private static final Pattern FOLLOWUP_PATTERN = Pattern.compile(
+            "(呢|吗|怎么样|如何|看下|看看|查下|查询下|这个呢|那个呢|这个|那个)\\s*[?？。.!！,，]*\\s*$");
 
-    // ========== 工具话题关键词：出现任何一个，才算「在聊运维/设备/能耗」，才有资格进补全 ==========
-    // （上一条历史命中了工具，当前问题如果完全不沾这些词，说明用户已经换话题了，不能补全）
-    private static final Pattern TOOL_TOPIC_WORD_PATTERN = Pattern.compile(
-            "设备|能耗|用电|电量|kwh|电度|数据|趋势|曲线|详情|详细信息|清单|列表|聚合|汇总|统计|合计|月度|月度|季度|年度|周|天|日|近半年|半年|6个月|sn|编号|号|机组|" +
-            "mv-|wzh_|呢|怎么样|如何|看下|看看|查下|查询下|这个|那个|它|那台|这台|上面那个|之前那个|刚才那个|同样|一样|换成|换成的|换个|另外|" +
-            // 工具名本身的同义词（历史刚被调用过工具名，用户说「XX呢」才算追同话题）
-            "能耗|设备|详情|清单");
+    // ========== 领域实词：出现即可确认「还在聊设备/能耗」 ==========
+    // 时间词必须带数量或聚合语义（近30天/按月/季度），单独的「天」「日」「周」太泛，
+    // 「今天怎么办」这种会被误判成能耗话题。
+    private static final Pattern DOMAIN_WORD_PATTERN = Pattern.compile(
+            "设备|能耗|用电|电量|kwh|电度|机组|编号|sn|mv-|wzh_|" +
+            "趋势|曲线|清单|列表|聚合|汇总|统计|合计|" +
+            "\\d+\\s*天|近\\d+天|按月|每月|月度|按周|每周|周统计|按季|季度|按年|年度|近半年|半年|6个月");
+
+    // ========== 追问标记：只说明「这是个追问」，对话题毫无指示作用 ==========
+    // 【踩过的坑】改造前把这两类词混在一张表里，只要命中任意一个就判定同话题。
+    // 而「如何…呢？」是最普通的中文问句形式 —— 线上出现过上一轮查 mv-005 能耗、
+    // 下一轮问「如何创建用户呢？」，因命中「如何」「呢」被判为同话题，
+    // 拼接历史继承了 mv-005，把知识库问题劫持成了能耗查询，还跳过了向量检索。
+    private static final Pattern FOLLOWUP_MARKER_PATTERN = Pattern.compile(
+            "呢|吗|怎么样|如何|多少|看下|看看|查下|查询下|" +
+            "这个|那个|它|他|她|那台|这台|这些|那些|上面那个|之前那个|刚才那个|" +
+            "同样|一样|换成|换个|另外|再|还有");
 
     // ========== 反模式：命中这些=明确换话题/闲聊/通用问答，直接拒绝补全 ==========
     //  优先级比 TOOL_TOPIC 更高
@@ -43,8 +54,15 @@ public class HeuristicRouter {
             "(换个话题|聊点别的|不说这个|不聊这个|问你个别的|另外|还有|顺便问下|对了还有|我想问下[^设备^能耗^数据]|想知道[^设备^能耗^数据]|解释下什么是|什么叫|怎么理解|定义是什么)");
 
     /**
-     * 判断当前问题是否看起来「还是在聊工具相关话题」
-     * 规则：先过 反模式（命中=换话题=false），再过 工具词匹配（命中=true）
+     * 判断当前问题是否「还在聊设备/能耗话题」，决定能否从历史继承 SN 等参数。
+     *
+     * <p>判定顺序：
+     * <ol>
+     *   <li>命中明确换话题/闲聊 → false</li>
+     *   <li>命中<b>领域实词</b> → true（这是唯一的正向确认信号）</li>
+     *   <li>只命中<b>追问标记</b>：仅当剥掉标记后几乎不剩实词时才算纯代词追问（「那个呢」「它呢」），
+     *       否则说明用户在问一件<b>新的具体的事</b>（「如何创建用户呢？」），判 false</li>
+     * </ol>
      */
     public boolean isLikelySameToolTopic(String currentQuestion, String lastUserQuestion) {
         if (currentQuestion == null || currentQuestion.isBlank()) return false;
@@ -55,18 +73,22 @@ public class HeuristicRouter {
             return false;
         }
 
-        // 2. 命中工具话题词 → true
-        if (TOOL_TOPIC_WORD_PATTERN.matcher(q).find()) {
+        // 2. 领域实词是唯一的正向确认信号
+        if (DOMAIN_WORD_PATTERN.matcher(q).find()) {
             return true;
         }
 
-        // 3. 没命中但字数非常短（≤4个字符），可能是纯代词追答，需要看历史是否工具调用来决策
-        //    比如 "mv-003" "呢" 这些 TOOL_TOPIC 已经包含在上面了，这里基本不会到
-        //    兜底：如果字数<=2 且 历史上条是能耗/设备查询 → 放行，宁可小误判也不拦
-        if (currentQuestion.strip().length() <= 2) {
-            String last = lastUserQuestion == null ? "" : lastUserQuestion.toLowerCase(Locale.ROOT);
-            if (ENERGY_WORD_PATTERN.matcher(last).find() || SN_PATTERN.matcher(last).find() || DEVICE_LIST_WORD_PATTERN.matcher(last).find()) {
-                return true;
+        // 3. 纯代词式追问：剥掉追问标记和标点后剩不下实词，才认为是在追上一个话题。
+        //    「那个呢」→ 剩 ""     → 是追问
+        //    「如何创建用户呢？」→ 剩「创建用户」 → 是新问题，不能继承历史
+        if (FOLLOWUP_MARKER_PATTERN.matcher(q).find()) {
+            String residue = FOLLOWUP_MARKER_PATTERN.matcher(q).replaceAll("")
+                    .replaceAll("[\\s\\p{Punct}\\p{IsPunctuation}]", "");
+            if (residue.length() <= 2) {
+                String last = lastUserQuestion == null ? "" : lastUserQuestion.toLowerCase(Locale.ROOT);
+                return ENERGY_WORD_PATTERN.matcher(last).find()
+                        || SN_PATTERN.matcher(last).find()
+                        || DEVICE_LIST_WORD_PATTERN.matcher(last).find();
             }
         }
 

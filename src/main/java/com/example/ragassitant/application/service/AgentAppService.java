@@ -40,6 +40,7 @@ public class AgentAppService {
     private final PromptBuilder promptBuilder;
     private final AgentTraceStorePort traceStore;
     private final RagAppService ragAppService;
+    private final QueryRewriteService queryRewriteService;
     // Spring AI 2.0 官方 @Tool 注解的 Bean，ChatClient.tools(deviceTools) 自动识别 6 个工具
     private final DeviceTools deviceTools;
 
@@ -53,6 +54,7 @@ public class AgentAppService {
                            PromptBuilder promptBuilder,
                            AgentTraceStorePort traceStore,
                            RagAppService ragAppService,
+                           QueryRewriteService queryRewriteService,
                            DeviceTools deviceTools) {
         this.llmPort = llmPort;
         this.vectorStorePort = vectorStorePort;
@@ -64,6 +66,7 @@ public class AgentAppService {
         this.promptBuilder = promptBuilder;
         this.traceStore = traceStore;
         this.ragAppService = ragAppService;
+        this.queryRewriteService = queryRewriteService;
         this.deviceTools = deviceTools;
         log.info("✅ AgentAppService 初始化完成（Spring AI 2.0 官方自动 Tool Calling Agent，不再手写 for 循环）");
     }
@@ -84,36 +87,33 @@ public class AgentAppService {
             }
         }
 
-        // ===== 启发式路由的上下文补全：从最近历史用户问题继承 SN/天数 =====
+        // ===== 两段式路由 =====
+        //   ① 原问题直接 route（零成本，覆盖绝大多数场景）
+        //   ② 上下文消解后再 route —— 优先用 LLM 改写；改写被关闭时才退回历史拼接启发式
+        //
+        // 【为什么不是「拼接优先、改写兜底」】线上实测：上一轮「mv-005的呢」查能耗，
+        // 下一轮问「如何创建用户呢？」，拼接启发式继承了 mv-005，把知识库问题劫持成能耗查询，
+        // 并且 FORCE_EXEC 会跳过向量检索 —— 用户拿到的是一段没有知识库依据的编造回答。
+        // 拼接本质是在用字符串匹配猜语义，而这正是 LLM 改写该做的事，所以改写优先、且其判断为准：
+        // 改写认为「这是新话题、原样输出」时，不再让拼接推翻它。
         ToolCall forcedTool = null;
+        String retrievalQuery = question;
         if (ENABLE_HEURISTIC_ROUTE) {
             forcedTool = heuristicRouter.route(question);
-            String lastUserQ = null;
+
             if (forcedTool == null && !history.isEmpty()) {
-                for (int i = history.size() - 1; i >= 0; i--) {
-                    lastUserQ = history.get(i).getKey();
-                    if (lastUserQ != null && !lastUserQ.isBlank()) break;
-                }
-            }
-            // ===== 【关键修复】上下文补全前置门禁：话题切换检测 =====
-            // 1. 当前问题本身没命中启发式
-            // 2. 且看起来和「设备/能耗/工具」完全不沾边（比如 "你是什么大模型" "你好"）
-            //    → 直接跳过补全，不继承上次的 SN/能耗工具，避免换话题后还去查能耗
-            boolean skipContextCompletion = false;
-            if (forcedTool == null && lastUserQ != null &&
-                !heuristicRouter.isLikelySameToolTopic(question, lastUserQ)) {
-                skipContextCompletion = true;
-                log.info("🚫 上下文补全被跳过：检测到换话题/闲聊 → current='{}' 已不在工具话题，不继承 lastUser='{}' 的 SN/工具",
-                        question, lastUserQ);
-            }
-            if (forcedTool == null && lastUserQ != null && !skipContextCompletion) {
-                String merged = question + " " + lastUserQ;
-                ToolCall lastT = heuristicRouter.route(lastUserQ);
-                ToolCall mergedT = heuristicRouter.route(merged);
-                forcedTool = mergedT != null ? mergedT : lastT;
-                if (forcedTool != null) {
-                    log.info("🧠 上下文补全触发：current='{}' 本身未命中，合并 lastUser='{}' → 命中工具 {}({})",
-                            question, lastUserQ, forcedTool.name, forcedTool.arguments);
+                if (queryRewriteService.isEnabled()) {
+                    retrievalQuery = queryRewriteService.rewrite(question, history, sessionId).get(0);
+                    if (!retrievalQuery.equals(question)) {
+                        ToolCall rewrittenTool = heuristicRouter.route(retrievalQuery);
+                        if (rewrittenTool != null) {
+                            forcedTool = rewrittenTool;
+                            log.info("🧠[改写命中] '{}' → '{}' → 工具 {}({})",
+                                    question, retrievalQuery, forcedTool.name, forcedTool.arguments);
+                        }
+                    }
+                } else {
+                    forcedTool = routeByHistoryConcat(question, history);
                 }
             }
         }
@@ -177,11 +177,13 @@ public class AgentAppService {
         }
 
         // ===== RAG 检索：只在启发式没命中 FORCE_EXEC 时才执行，且包 try-catch（embedding 模型异常不阻断 Agent）=====
+        // 注意：检索用改写后的 query，但下面塞进 messages 的始终是用户原话 ——
+        // 改写产物一旦回流到对话上下文，后续轮次会在改写结果上继续改写，误差逐轮累积。
         String userContent = question;
         if (useRag) {
             try {
                 int effectiveTopK = customTopK != null && customTopK > 0 ? customTopK : 4;
-                List<DocumentChunk> docs = ragAppService.retrieveDocuments(question, enableHybridSearch, effectiveTopK);
+                List<DocumentChunk> docs = ragAppService.retrieveDocuments(retrievalQuery, enableHybridSearch, effectiveTopK);
                 if (docs != null && !docs.isEmpty()) {
                     StringBuilder ragContext = new StringBuilder();
                     ragContext.append("## 知识库参考内容\n\n");
@@ -272,6 +274,37 @@ public class AgentAppService {
         }
 
         return new ChatResponse(finalAnswer, sourceDocs);
+    }
+
+    /**
+     * 零成本的历史拼接补全：把当前问题和上一条用户问题拼起来重新过启发式，
+     * 借此从历史继承 SN / 天数等参数。
+     *
+     * <p><b>仅在 Query 改写被关闭时作为兜底</b>。它是用字符串匹配猜语义，
+     * 已知会误伤和历史无关的新问题（见 {@link HeuristicRouter#isLikelySameToolTopic} 的注释），
+     * 门禁收紧后误伤面变小，但本质缺陷仍在。
+     */
+    private ToolCall routeByHistoryConcat(String question, List<Map.Entry<String, String>> history) {
+        String lastUserQ = null;
+        for (int i = history.size() - 1; i >= 0; i--) {
+            lastUserQ = history.get(i).getKey();
+            if (lastUserQ != null && !lastUserQ.isBlank()) break;
+        }
+        if (lastUserQ == null || lastUserQ.isBlank()) return null;
+
+        if (!heuristicRouter.isLikelySameToolTopic(question, lastUserQ)) {
+            log.info("🚫 上下文补全被跳过：检测到换话题 → current='{}' 不在设备/能耗话题，不继承 lastUser='{}' 的 SN/工具",
+                    question, lastUserQ);
+            return null;
+        }
+
+        ToolCall mergedT = heuristicRouter.route(question + " " + lastUserQ);
+        ToolCall forcedTool = mergedT != null ? mergedT : heuristicRouter.route(lastUserQ);
+        if (forcedTool != null) {
+            log.info("🧠 上下文补全触发（改写已关闭）：current='{}' 本身未命中，合并 lastUser='{}' → 命中工具 {}({})",
+                    question, lastUserQ, forcedTool.name, forcedTool.arguments);
+        }
+        return forcedTool;
     }
 
     private String callLLM(List<MessageDTO> messages) {

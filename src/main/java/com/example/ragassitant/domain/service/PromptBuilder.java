@@ -52,6 +52,28 @@ public class PromptBuilder {
                 """.formatted(ragRole, context == null ? "" : context);
     }
 
+    /**
+     * Query 改写提示词：把依赖上下文的省略式追问，还原成可独立检索的完整问句。
+     *
+     * <p>约束的重点是「不许发挥」—— 改写结果只用于检索，多补一个字都可能把召回带偏；
+     * 换话题时原样输出，避免继承上一轮的实体。
+     */
+    public String buildQueryRewritePrompt(String historyText) {
+        return """
+                你是查询改写器。根据对话历史，把用户最新的问题改写成不依赖上下文、可独立检索的完整问句。
+
+                规则：
+                1. 只做指代消解和信息补全，不要回答问题，不要添加历史中不存在的信息
+                2. 最新问题本身已经完整 → 原样输出
+                3. 与历史完全无关的新话题 → 原样输出，不要继承历史里的实体
+                4. 保持原问题的语言和提问方式，不要扩写、不要解释
+                5. 只输出改写后的问句本身，不要前缀、不要引号、不要换行
+
+                对话历史：
+                %s
+                """.formatted(historyText == null ? "（无）" : historyText);
+    }
+
     public String buildForcedToolExecutionFeedback(String toolResult) {
         return "工具执行结果如下：\n```\n" + (toolResult == null ? "" : toolResult) + "\n```\n\n" +
                 "请基于以上工具执行结果，用中文自然语言回答用户的原始问题（不要再次调用工具，数据已经提供）。" +

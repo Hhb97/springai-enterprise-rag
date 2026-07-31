@@ -1,5 +1,6 @@
 package com.example.ragassitant.application.service;
 
+import com.example.ragassitant.domain.model.ChunkMetaKeys;
 import com.example.ragassitant.domain.model.DocumentChunk;
 import com.example.ragassitant.domain.spi.DocumentReaderPort;
 import com.example.ragassitant.domain.spi.VectorStorePort;
@@ -21,7 +22,10 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -49,27 +53,38 @@ public class IngestAppService {
         int deleted = vectorStorePort.deleteAll();
         log.info("✅ 已删除 {} 条历史向量", deleted);
 
+        // 单次枚举后按扩展名分派，保证每个文件只被读一次。
+        // 改造前用三条 glob 分别取 md / pdf / {doc,docx,xls,xlsx,txt}，其中花括号写法是错的：
+        // Spring 的 AntPathMatcher 不支持 shell 的 {a,b} 展开，会把 {...} 当成 URI 模板变量编译为 (.*)，
+        // 于是 "*.{doc,docx,...}" 实际等价于 "*.任意后缀"，把 .md/.pdf 也匹配上 ——
+        // 同一份文档既被 Markdown 解析器读一次、又被 Tika 读一次，重复内容直接挤占检索 topK。
         PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
-        Resource[] mdResources = resolver.getResources("classpath:docs/**/*.md");
-        Resource[] pdfResources = resolver.getResources("classpath:docs/**/*.pdf");
-        Resource[] otherResources = resolver.getResources("classpath:docs/**/*.{doc,docx,xls,xlsx,txt}");
-
         List<DocumentChunk> allChunks = new ArrayList<>();
-        for (Resource resource : mdResources) allChunks.addAll(readResourceChunks(resource, "markdown"));
-        for (Resource resource : pdfResources) allChunks.addAll(readResourceChunks(resource, "pdf"));
-        for (Resource resource : otherResources) allChunks.addAll(readResourceChunks(resource, "other"));
+        Set<String> visited = new HashSet<>();
+
+        for (Resource resource : resolver.getResources("classpath:docs/**/*")) {
+            if (!resource.isReadable()) continue;   // 跳过目录等不可读条目
+            String fileName = resource.getFilename();
+            String fileType = detectFileType(fileName);
+            if (fileType == null) {
+                log.debug("⏭️ 跳过不支持的文件: {}", fileName);
+                continue;
+            }
+            // 同一物理资源出现在多个 classpath 根下时只处理一次
+            String key = safeUri(resource);
+            if (key != null && !visited.add(key)) {
+                log.warn("⚠️ 跳过重复资源: {}", key);
+                continue;
+            }
+            allChunks.addAll(readResourceChunks(resource, fileType));
+        }
 
         List<DocumentVersionJpaEntity> activeDocs = documentVersionRepository.findByStatus(DocumentStatus.ACTIVE);
         for (DocumentVersionJpaEntity docVersion : activeDocs) {
             Path filePath = Paths.get(docVersion.getFilePath());
             if (Files.exists(filePath)) {
                 List<DocumentChunk> chunks = readFileChunks(filePath.toString(), docVersion.getFileType(), docVersion.getFileName());
-                chunks.forEach(c -> {
-                    if (c.getMetadata() == null) c.setMetadata(new HashMap<>());
-                    c.getMetadata().put("documentId", docVersion.getDocumentId());
-                    c.getMetadata().put("version", docVersion.getVersion());
-                    c.getMetadata().put("fileName", docVersion.getFileName());
-                });
+                chunks.forEach(c -> applyVersionMeta(c, docVersion));
                 allChunks.addAll(chunks);
             }
         }
@@ -103,12 +118,7 @@ public class IngestAppService {
         }
 
         List<DocumentChunk> chunks = readFileChunks(docVersion.getFilePath(), docVersion.getFileType(), docVersion.getFileName());
-        chunks.forEach(c -> {
-            if (c.getMetadata() == null) c.setMetadata(new HashMap<>());
-            c.getMetadata().put("documentId", docVersion.getDocumentId());
-            c.getMetadata().put("version", docVersion.getVersion());
-            c.getMetadata().put("fileName", docVersion.getFileName());
-        });
+        chunks.forEach(c -> applyVersionMeta(c, docVersion));
 
         log.info("✅ 加载文档: {} v{}，共 {} 个块", docVersion.getFileName(), docVersion.getVersion(), chunks.size());
 
@@ -153,24 +163,56 @@ public class IngestAppService {
         }
     }
 
+    /**
+     * 按扩展名判定解析通道，返回 null 表示不支持、应跳过。
+     * <p>包级可见以便单测直接覆盖分派规则。
+     */
+    static String detectFileType(String fileName) {
+        if (fileName == null || fileName.isBlank()) return null;
+        int dot = fileName.lastIndexOf('.');
+        if (dot < 0 || dot == fileName.length() - 1) return null;
+        return switch (fileName.substring(dot + 1).toLowerCase(Locale.ROOT)) {
+            case "md", "markdown" -> "markdown";
+            case "pdf" -> "pdf";
+            case "doc", "docx", "xls", "xlsx", "txt" -> "other";
+            default -> null;
+        };
+    }
+
+    private String safeUri(Resource resource) {
+        try {
+            return resource.getURI().toString();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** 补充版本管理相关的业务元数据（fileName 用版本表里的值覆盖，其余结构元数据保持解析器产出） */
+    private void applyVersionMeta(DocumentChunk chunk, DocumentVersionJpaEntity docVersion) {
+        if (chunk.getMetadata() == null) chunk.setMetadata(new HashMap<>());
+        chunk.getMetadata().put(ChunkMetaKeys.DOCUMENT_ID, docVersion.getDocumentId());
+        chunk.getMetadata().put(ChunkMetaKeys.VERSION, docVersion.getVersion());
+        chunk.getMetadata().put(ChunkMetaKeys.FILE_NAME, docVersion.getFileName());
+    }
+
+    /**
+     * 直接透传解析器产出的 chunk（含 headingPath / title / pageNumber 等结构元数据）。
+     * 改造前这里会用 fileName 覆盖 title，导致全库 title 同值、检索侧的 title 加权形同虚设。
+     */
     private List<DocumentChunk> readChunks(InputStream input, String fileType, String fileName) {
-        List<String> texts = switch (fileType == null ? "other" : fileType.toLowerCase()) {
+        List<DocumentChunk> chunks = switch (fileType == null ? "other" : fileType.toLowerCase()) {
             case "markdown" -> documentReaderPort.readMarkdown(input, fileName);
             case "pdf" -> documentReaderPort.readPdf(input, fileName);
             default -> documentReaderPort.readGeneric(input, fileName);
         };
-        List<DocumentChunk> chunks = new ArrayList<>(texts.size());
-        for (String text : texts) {
-            if (text == null || text.isBlank()) continue;
-            DocumentChunk c = new DocumentChunk();
-            c.setId(UUID.randomUUID().toString());
-            c.setText(text);
-            HashMap<String, Object> meta = new HashMap<>();
-            meta.put("fileName", fileName);
-            meta.put("title", fileName);
-            c.setMetadata(meta);
-            chunks.add(c);
+        List<DocumentChunk> result = new ArrayList<>(chunks.size());
+        for (DocumentChunk c : chunks) {
+            if (c == null || c.getText() == null || c.getText().isBlank()) continue;
+            if (c.getId() == null) c.setId(UUID.randomUUID().toString());
+            if (c.getMetadata() == null) c.setMetadata(new HashMap<>());
+            c.getMetadata().putIfAbsent(ChunkMetaKeys.FILE_NAME, fileName);
+            result.add(c);
         }
-        return chunks;
+        return result;
     }
 }

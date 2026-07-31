@@ -1,10 +1,15 @@
 package com.example.ragassitant.infrastructure.config;
 
+import com.example.ragassitant.domain.spi.LlmPort;
+import com.example.ragassitant.infrastructure.llm.SpringAiOllamaAdapter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.model.openai.OpenAiChatOptions;
+import org.springframework.ai.model.ollama.OllamaChatOptions;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -59,6 +64,67 @@ public class LlmBackendConfig {
     @Primary
     public ChatClient.Builder primaryChatClientBuilder(ChatModel primaryChatModel) {
         return ChatClient.builder(primaryChatModel);
+    }
+
+    /**
+     * Query 改写专用的 LlmPort，后端由 {@code rag.query-rewrite.backend} 独立指定。
+     *
+     * <p>为什么要独立配置：指代消解对 1.5b 级别的小模型偏吃力，改写跑偏反而会让检索更差；
+     * 而改写又在问答主链路上，用本地小模型还要额外付 1~3s 推理延迟。默认指向 DashScope 的
+     * 轻量模型，既快又便宜；想完全离线就把它改回 ollama。
+     *
+     * <p>目标后端不可用时降级到主聊天模型，绝不因为改写这个可选环节导致启动失败。
+     */
+    @Bean("queryRewriteLlmPort")
+    public LlmPort queryRewriteLlmPort(
+            @Value("${rag.query-rewrite.backend:dashscope}") String rewriteBackend,
+            @Value("${rag.query-rewrite.model:}") String rewriteModel,
+            @Autowired(required = false) @Qualifier("ollamaChatModel") ChatModel ollamaChatModel,
+            @Autowired(required = false) @Qualifier("openAiChatModel") ChatModel openAiChatModel,
+            ChatModel primaryChatModel) {
+
+        String backend = (rewriteBackend == null ? "" : rewriteBackend.trim().toLowerCase());
+        ChatModel chosen;
+        boolean degraded = false;
+
+        if ("ollama".equals(backend) && ollamaChatModel != null) {
+            chosen = ollamaChatModel;
+            log.info("✅ Query 改写后端：ollama（本地）");
+        } else if (("dashscope".equals(backend) || "openai".equals(backend)) && openAiChatModel != null) {
+            chosen = openAiChatModel;
+            log.info("✅ Query 改写后端：{}（OpenAI 兼容模式）", backend);
+        } else {
+            chosen = primaryChatModel;
+            degraded = true;
+            log.warn("⚠️ Query 改写后端 '{}' 不可用，降级使用主聊天模型（改写质量可能下降，但不影响主流程）",
+                    rewriteBackend);
+        }
+
+        ChatClient.Builder builder = ChatClient.builder(chosen);
+        // 降级到主模型时不套用改写模型名 —— 模型名是跟后端绑定的，跨后端用必然 404
+        if (!degraded && rewriteModel != null && !rewriteModel.isBlank()) {
+            // 改写是机械任务，温度压到最低求稳定
+            // ChatOptions 是接口没有静态 builder，必须按后端用具体实现类：
+            //   ollama 后端 → OllamaChatOptions.builder()
+            //   dashscope/openai 兼容模式 → OpenAiChatOptions.builder()
+            ChatOptions rewriteOptions;
+            if ("ollama".equals(backend)) {
+                rewriteOptions = OllamaChatOptions.builder()
+                        .model(rewriteModel)
+                        .temperature(0.1)
+                        .build();
+            } else {
+                rewriteOptions = OpenAiChatOptions.builder()
+                        .model(rewriteModel)
+                        .temperature(0.1)
+                        .build();
+            }
+            builder = builder.defaultOptions(rewriteOptions);
+            log.info("✅ Query 改写模型：{}", rewriteModel);
+        } else {
+            log.info("ℹ️ Query 改写沿用后端默认模型（未指定 rag.query-rewrite.model）");
+        }
+        return new SpringAiOllamaAdapter(builder);
     }
 
     /**
