@@ -8,8 +8,8 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.embedding.EmbeddingModel;
-import org.springframework.ai.model.openai.OpenAiChatOptions;
-import org.springframework.ai.model.ollama.OllamaChatOptions;
+import org.springframework.ai.ollama.api.OllamaChatOptions;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -107,19 +107,16 @@ public class LlmBackendConfig {
             // ChatOptions 是接口没有静态 builder，必须按后端用具体实现类：
             //   ollama 后端 → OllamaChatOptions.builder()
             //   dashscope/openai 兼容模式 → OpenAiChatOptions.builder()
-            ChatOptions rewriteOptions;
+            // 注意：Spring AI 2.0 defaultOptions() 接受 Builder，不要提前 .build()
             if ("ollama".equals(backend)) {
-                rewriteOptions = OllamaChatOptions.builder()
+                builder = builder.defaultOptions(OllamaChatOptions.builder()
                         .model(rewriteModel)
-                        .temperature(0.1)
-                        .build();
+                        .temperature(0.1));
             } else {
-                rewriteOptions = OpenAiChatOptions.builder()
+                builder = builder.defaultOptions(OpenAiChatOptions.builder()
                         .model(rewriteModel)
-                        .temperature(0.1)
-                        .build();
+                        .temperature(0.1));
             }
-            builder = builder.defaultOptions(rewriteOptions);
             log.info("✅ Query 改写模型：{}", rewriteModel);
         } else {
             log.info("ℹ️ Query 改写沿用后端默认模型（未指定 rag.query-rewrite.model）");
