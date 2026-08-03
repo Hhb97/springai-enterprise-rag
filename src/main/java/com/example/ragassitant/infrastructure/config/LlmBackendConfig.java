@@ -1,7 +1,7 @@
 package com.example.ragassitant.infrastructure.config;
 
 import com.example.ragassitant.domain.spi.LlmPort;
-import com.example.ragassitant.infrastructure.llm.SpringAiOllamaAdapter;
+import com.example.ragassitant.infrastructure.llm.SpringAiChatAdapter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -121,7 +121,7 @@ public class LlmBackendConfig {
         } else {
             log.info("ℹ️ Query 改写沿用后端默认模型（未指定 rag.query-rewrite.model）");
         }
-        return new SpringAiOllamaAdapter(builder);
+        return new SpringAiChatAdapter(builder);
     }
 
     /**

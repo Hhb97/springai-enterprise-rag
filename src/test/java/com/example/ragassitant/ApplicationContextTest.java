@@ -4,7 +4,7 @@ import com.example.ragassitant.application.service.AgentAppService;
 import com.example.ragassitant.application.service.QueryRewriteService;
 import com.example.ragassitant.application.service.RagAppService;
 import com.example.ragassitant.domain.spi.LlmPort;
-import com.example.ragassitant.infrastructure.llm.SpringAiOllamaAdapter;
+import com.example.ragassitant.infrastructure.llm.SpringAiChatAdapter;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -62,7 +62,7 @@ class ApplicationContextTest {
     void twoLlmPortsCoexistWithoutAmbiguity() {
         assertNotNull(primaryLlmPort);
         assertNotNull(rewriteLlmPort);
-        assertInstanceOf(SpringAiOllamaAdapter.class, primaryLlmPort);
+        assertInstanceOf(SpringAiChatAdapter.class, primaryLlmPort);
         assertNotSame(primaryLlmPort, rewriteLlmPort,
                 "改写用的应是独立实例，否则 rag.query-rewrite.backend 配置不起作用");
     }

@@ -9,6 +9,8 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
 
@@ -16,23 +18,25 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * LlmPort 的 Spring AI 实现。
+ * LlmPort 的 Spring AI 实现，与具体后端无关。
  *
- * <p>类名保留了历史叫法，实际后端由 {@code spring.ai.chat-backend} 决定（Ollama / DashScope 兼容模式），
+ * <p>后端由 {@code spring.ai.chat-backend} 决定（Ollama 本地 / DashScope 等 OpenAI 兼容协议），
  * 见 {@link com.example.ragassitant.infrastructure.config.LlmBackendConfig}。
+ * 原名 {@code SpringAiOllamaAdapter} 是最初只接 Ollama 时留下的，类名和职责已经不符 ——
+ * 排查「为什么请求打到了云上」时，一个叫 Ollama 的类会把人带偏，所以改名。
  *
  * <p>标 {@code @Primary}：Query 改写会注册第二个 LlmPort bean（可指向不同后端），
  * 需要明确谁是主实现，否则按类型注入会歧义。
  */
 @Component
 @Primary
-public class SpringAiOllamaAdapter implements LlmPort {
+public class SpringAiChatAdapter implements LlmPort {
 
-    private static final Logger log = LoggerFactory.getLogger(SpringAiOllamaAdapter.class);
+    private static final Logger log = LoggerFactory.getLogger(SpringAiChatAdapter.class);
     private final ChatClient chatClient;
     private final ChatClient.Builder chatClientBuilder;
 
-    public SpringAiOllamaAdapter(ChatClient.Builder chatClientBuilder) {
+    public SpringAiChatAdapter(ChatClient.Builder chatClientBuilder) {
         this.chatClientBuilder = chatClientBuilder;
         this.chatClient = chatClientBuilder.build();
     }
@@ -89,26 +93,74 @@ public class SpringAiOllamaAdapter implements LlmPort {
     @Override
     public String chatWithAutoToolCalling(List<MessageDTO> messages, int maxToolCalls, List<Object> toolBeans) {
         try {
-            Object[] tools = toolBeans == null ? new Object[0] : toolBeans.toArray();
+            List<Object> beans = toolBeans == null ? List.of() : toolBeans;
             int maxCalls = maxToolCalls <= 0 ? 5 : maxToolCalls;
-            log.info("🤖[Spring AI 2.0 官方 Tool Calling] 开始：消息数={}, 最大工具轮次={}, 工具Bean数={}",
-                    messages == null ? 0 : messages.size(), maxCalls, tools.length);
+            log.info("🤖[Spring AI 2.0 官方 Tool Calling] 开始：消息数={}, 最大工具轮次={}, 工具数={}",
+                    messages == null ? 0 : messages.size(), maxCalls, beans.size());
 
             // Spring AI 2.0 ChatClient 内部自动完成 Agent 循环，不需要手写 for：
             //   LLM → 检测 tool_call 响应 → 反射调用 @Tool 注解方法 → 自动塞回 ToolMessage → 循环 → 出最终纯文本
-            String finalContent = chatClientBuilder.build()
+            //
+            // 取 chatResponse() 而不是 content()：多拿到「实际服务的模型名」和「本轮有没有 tool_calls」。
+            // 【为什么必须打这两个值】排查「模型没调工具」时，第一个要排除的就是
+            // 「请求根本没打到你以为的那个模型」—— spring.ai.chat-backend 默认 ollama，
+            // 而 spring.ai.openai.* 下面可能配着另一个模型，只看配置文件是分辨不出来的。
+            ChatClient.ChatClientRequestSpec spec = chatClientBuilder.build()
                     .prompt()
-                    .messages(toSpringMessages(messages))
-                    .tools(tools)
-                    .call()
-                    .content();
+                    .messages(toSpringMessages(messages));
 
-            log.info("✅[Spring AI 2.0 官方 Tool Calling] 结束：最终回答长度={}", finalContent == null ? 0 : finalContent.length());
+            // 两种注册方式：
+            //   ToolCallback  → toolCallbacks(...)，可以套装饰器（日志/trace/动态挑选），
+            //                   也是后续「按 query 检索 top-K 个工具再注册」的必经接口
+            //   普通 @Tool Bean → tools(...)，由框架自己反射扫描注解
+            // tools(Object...) 不接受 ToolCallback 实例，所以必须分流。
+            List<ToolCallback> callbacks = asToolCallbacks(beans);
+            spec = callbacks != null ? spec.toolCallbacks(callbacks) : spec.tools(beans.toArray());
+
+            ChatResponse response = spec.call().chatResponse();
+
+            String finalContent = response == null || response.getResult() == null
+                    ? null : response.getResult().getOutput().getText();
+            log.info("✅[Spring AI 2.0 官方 Tool Calling] 结束：模型={}, 本轮tool_calls={}, finishReason={}, 最终回答长度={}",
+                    modelOf(response), toolCallCount(response), finishReasonOf(response),
+                    finalContent == null ? 0 : finalContent.length());
             return finalContent;
         } catch (Exception e) {
             log.error("❌ Spring AI 2.0 官方 Tool Calling 执行失败", e);
             return null;
         }
+    }
+
+    /** 全部是 ToolCallback 时返回强类型列表；否则返回 null，表示按普通 {@code @Tool} Bean 处理。 */
+    private static List<ToolCallback> asToolCallbacks(List<Object> beans) {
+        if (beans.isEmpty() || !beans.stream().allMatch(b -> b instanceof ToolCallback)) return null;
+        return beans.stream().map(b -> (ToolCallback) b).toList();
+    }
+
+    private static String modelOf(ChatResponse response) {
+        if (response == null || response.getMetadata() == null) return "unknown";
+        String model = response.getMetadata().getModel();
+        return model == null || model.isBlank() ? "unknown" : model;
+    }
+
+    /**
+     * 最后一轮响应里 tool_calls 的数量。
+     *
+     * <p>正常结束时通常是 0（工具已经在前面的轮次执行完，最后一轮是纯文本总结）。
+     * 它的诊断价值在于：如果全程都是 0、而模型的文本里却写着 {@code [{"name":...}]}，
+     * 就说明这个模型没有走原生 tool_calls 通道 —— 是模型能力问题，不是编排问题。
+     */
+    private static int toolCallCount(ChatResponse response) {
+        if (response == null || response.getResult() == null) return 0;
+        return response.getResult().getOutput().hasToolCalls()
+                ? response.getResult().getOutput().getToolCalls().size() : 0;
+    }
+
+    private static String finishReasonOf(ChatResponse response) {
+        if (response == null || response.getResult() == null
+                || response.getResult().getMetadata() == null) return "unknown";
+        String reason = response.getResult().getMetadata().getFinishReason();
+        return reason == null || reason.isBlank() ? "unknown" : reason;
     }
 
     private static List<Message> toSpringMessages(List<MessageDTO> messages) {
@@ -125,4 +177,4 @@ public class SpringAiOllamaAdapter implements LlmPort {
         }
         return springMessages;
     }
-}
+}

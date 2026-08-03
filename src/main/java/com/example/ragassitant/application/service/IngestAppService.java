@@ -99,11 +99,11 @@ public class IngestAppService {
         log.info("✅ 向量库已构建，共 {} 条记录", allChunks.size());
 
         vectorStorePort.persist();
-        log.info("🔄 刷新 Spring AI 2.0 BM25 倒排索引...");
+        log.info("🔄 重新绑定向量检索器...");
         try {
-            ragAppService.rebuildBm25Index();
+            ragAppService.rebuildRetriever();
         } catch (Exception e) {
-            log.warn("⚠️ BM25 索引刷新失败（不影响主流程，降级使用线性加权检索）: {}", e.getMessage());
+            log.warn("⚠️ 检索器重新绑定失败（不影响主流程，下次查询仍走旧检索器）: {}", e.getMessage());
         }
         return allChunks.size();
     }
@@ -135,11 +135,11 @@ public class IngestAppService {
 
         vectorStorePort.persist();
         log.info("✅ 文档版本 {} v{} 已入库，共 {} 条向量", docVersion.getDocumentId(), docVersion.getVersion(), chunks.size());
-        log.info("🔄 刷新 Spring AI 2.0 BM25 倒排索引...");
+        log.info("🔄 重新绑定向量检索器...");
         try {
-            ragAppService.rebuildBm25Index();
+            ragAppService.rebuildRetriever();
         } catch (Exception e) {
-            log.warn("⚠️ BM25 索引刷新失败（不影响主流程）: {}", e.getMessage());
+            log.warn("⚠️ 检索器重新绑定失败（不影响主流程）: {}", e.getMessage());
         }
         return chunks.size();
     }
@@ -215,4 +215,4 @@ public class IngestAppService {
         }
         return result;
     }
-}
+}

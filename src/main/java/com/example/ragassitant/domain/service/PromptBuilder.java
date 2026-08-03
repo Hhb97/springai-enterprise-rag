@@ -10,34 +10,47 @@ public class PromptBuilder {
     @Value("${prompt.rag.role:你是专业的后端管理平台 AI 助手}")
     private String ragRole;
 
-    @Value("${prompt.agent.max-history:20}")
-    private int maxHistory;
+    // 原先这里还有一个 maxHistory（prompt.agent.max-history），注入了却从未使用 ——
+    // 提示词构造器本来就不该管历史轮数，那是编排层的事。已并入 agent.memory-size。
 
+    /**
+     * Agent 系统提示词。
+     *
+     * <p><b>🔴 这里原先有一条会直接破坏原生 Tool Calling 的指令</b>：
+     * <pre>
+     * ## 输出格式
+     * 需要调工具时，只输出 JSON 数组，不要加任何解释：
+     * [{"name":"工具名","arguments":{"参数":"值"}}]
+     * </pre>
+     * 那是手写 Agent 循环时代的产物（当年由 {@code ToolCallParser} 从文本里正则抠 JSON）。
+     * 迁到 Spring AI 2.0 之后，模型<b>照做</b>就等于绕开了 {@code tool_calls} 通道 ——
+     * 框架看不到工具调用，把那段 JSON 当最终答案返回，再被 {@code cleanupAnswer} 洗成「[}]」交给用户。
+     * 线上实测 qwen3.7-plus 完全遵守了这条指令，于是被误判成「模型不支持 tool calling」，
+     * 而它其实是支持的 —— 是提示词在和框架对着干。
+     *
+     * <p>另外删掉了手写的「## 工具清单」：工具名、参数、描述由框架从 {@code @Tool} 注解自动注入，
+     * 在提示词里再抄一份只会和注解漂移（改了注解忘了改提示词，模型就会按旧参数名填参）。
+     */
     public String buildAgentSystemPrompt() {
         return """
                 %s，回答必须基于真实工具返回的数据，禁止编造数字和表格。
-                
-                ## 什么时候需要调用工具
-                - 用户问"有什么设备"、"列出设备" → 调用 list_devices
-                - 用户按名称或部分编号找设备（没给完整SN）→ 调用 list_devices，把关键词当参数
-                - 用户提到"能耗"、"用电"但没给具体 SN 号 → 先调用 list_devices 帮用户找 SN，再查
-                
-                ## 什么时候不用调工具
-                大部分请求（带 mv-xxx / wzh_xxx SN 号的能耗查询）Java 层已经自动调了工具，你只需要总结结果即可。
-                
-                ## 工具清单
-                1. list_devices(keyword)   查设备清单，keyword 可选
-                2. get_device_detail(sn)   查单台设备详情，sn 必填
-                3. query_energy_half_year(sn)    查近半年每日能耗
-                4. query_energy_by_days(sn, days)  查最近 N 天每日能耗
-                5. query_energy_by_date_range(sn, startDate, endDate)   按具体日期范围查
-                6. aggregate_energy(sn, granularity)  按粒度聚合，granularity=week/month/quarter/year
-                
+
+                ## 如何调用工具
+                需要设备信息或能耗数据时，**直接使用你的工具调用能力**发起调用。
+                严禁把工具调用写成文本或 JSON 输出给用户（例如输出 [{"name":...,"arguments":...}] 这种内容）——
+                那不会被执行，用户只会看到一段无意义的字符。
+
+                什么时候该调：
+                - 用户问"有什么设备"、"列出设备" → list_devices
+                - 用户按名称或部分编号找设备（没给完整 SN）→ list_devices，把关键词当参数
+                - 用户提到"能耗"、"用电"但没给具体 SN 号 → 先 list_devices 帮用户找到 SN，再查能耗
+
+                什么时候不该调：
+                - 对话中已经给出了工具执行结果 → 直接基于那份结果作答，不要重复调用
+                - 闲聊、知识库类问题、信息不足无法确定参数 → 不调用，直接回答或向用户追问
+
                 ## 输出格式
-                需要调工具时，只输出 JSON 数组，不要加任何解释：
-                [{"name":"工具名","arguments":{"参数":"值"}}]
-                
-                不需要调工具时，直接用中文自然语言回答，能耗数据整理成 Markdown 表格，不要编造数据。
+                用中文自然语言回答。能耗和设备数据整理成 Markdown 表格，单位标注清楚，不要编造数据。
                 """.formatted(agentRole);
     }
 
@@ -124,6 +137,56 @@ public class PromptBuilder {
                 对话历史：
                 %s
                 """.formatted(historyText == null ? "（无）" : historyText);
+    }
+
+    /**
+     * 启发式路由命中后给 LLM 的「建议」提示（RECOMMEND_LLM 策略）。
+     *
+     * <p><b>🔴 这段文案原先是坏的</b>：它写着「只输出下面这行 JSON：[{"name":...,"arguments":...}]」，
+     * 那是手写 Agent 循环时代的产物 —— 当年有 {@code ToolCallParser} 从模型的<b>文本</b>里正则抠 JSON。
+     * 迁到 Spring AI 2.0 原生 Tool Calling 之后，只有结构化的 {@code tool_calls} 字段才会被执行，
+     * 模型吐出的文本 JSON 没有任何人执行，还会被 {@code cleanupAnswer} 的正则整段抹掉 ——
+     * 用户最终拿到「未能生成有效回答」。这个分支从迁移那天起就跑不通，只因默认策略是 FORCE_EXEC 没暴露。
+     *
+     * <p>现在改成纯自然语言建议，并明确要求「走工具调用通道、不要写成文本」，把决定权真正交给模型。
+     */
+    public String buildToolRecommendationHint(String toolName, String argsJson) {
+        return """
+
+                【系统提示 · 来自关键词路由的建议】
+                根据关键词匹配，本次提问很可能需要调用工具 %s，建议参数 %s。
+                这只是**建议**，请按你自己的理解决定：
+                - 认同 → 正常调用该工具（使用工具调用能力，不要把调用过程写成文本或 JSON 输出给用户）
+                - 不认同 → 自行选择更合适的工具，或不调用工具直接回答
+                """.formatted(toolName, argsJson == null ? "{}" : argsJson);
+    }
+
+    /**
+     * 影子路由提示词：只让模型「选工具」，不执行、不作答。
+     *
+     * <p>用途是评估「启发式正则路由能否换成 LLM 自主选择」—— 把模型的选择和正则的选择记进
+     * AgentTrace 做比对，拿到真实的一致率/误判率之后再决定是否切换，而不是凭感觉改架构。
+     *
+     * <p>要求严格 JSON 是为了可解析；{@code tool: null} 这个出口很重要 ——
+     * 没有它模型会被迫从清单里硬选一个，那样测出来的一致率是假的。
+     */
+    public String buildToolSelectionPrompt(String toolCatalog) {
+        return """
+                你是工具路由器。根据对话历史和用户最新的问题，判断本次是否需要调用工具、以及调用哪一个。
+
+                可用工具：
+                %s
+
+                规则：
+                1. 只做判断，不要执行、不要回答用户的问题
+                2. 不需要调用任何工具时（闲聊、知识库类问题、信息不足），tool 填 null
+                3. 参数只能来自用户问题或对话历史，不确定的参数一律省略，禁止编造 SN 号和日期
+                4. 参数名必须和上面的参数 schema 完全一致
+                5. 只输出一个 JSON 对象，不要解释、不要 Markdown 代码块
+
+                输出格式：
+                {"tool": "工具名或null", "arguments": {...}, "reason": "一句话理由"}
+                """.formatted(toolCatalog == null ? "（无）" : toolCatalog);
     }
 
     public String buildForcedToolExecutionFeedback(String toolResult) {

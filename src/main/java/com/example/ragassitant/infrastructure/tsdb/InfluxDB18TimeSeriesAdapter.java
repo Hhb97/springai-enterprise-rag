@@ -44,13 +44,25 @@ public class InfluxDB18TimeSeriesAdapter implements TimeSeriesDbPort {
 
     @Nullable
     private final InfluxDB influxDB;
-    private final EnergyAggregator aggregator = new EnergyAggregator();
 
-    @Value("${influxdb.database:acucloud}")
-    private String database;
+    /**
+     * 注入 Spring 管理的那一个实例。
+     *
+     * <p>改造前这里是 {@code new EnergyAggregator()}，而 {@code DomainServiceConfig} 里还注册了一个同类 bean
+     * （{@code DeviceTools} 用的是那个）—— 同一份聚合逻辑存在两个实例。目前它无状态所以看不出问题，
+     * 一旦聚合规则要配置化，就会出现「改了 bean 但适配器用的是另一个」这种极难定位的偏差。
+     */
+    private final EnergyAggregator aggregator;
 
-    public InfluxDB18TimeSeriesAdapter(@Nullable InfluxDB influxDB) {
+    /** 用构造注入而非字段 {@code @Value}：与本类其余依赖保持一致，也让单测能直接 new 出来。 */
+    private final String database;
+
+    public InfluxDB18TimeSeriesAdapter(@Nullable InfluxDB influxDB,
+                                       EnergyAggregator aggregator,
+                                       @Value("${influxdb.database:acucloud}") String database) {
         this.influxDB = influxDB;
+        this.aggregator = aggregator;
+        this.database = database;
     }
 
     @Override

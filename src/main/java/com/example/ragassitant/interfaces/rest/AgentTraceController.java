@@ -30,6 +30,21 @@ public class AgentTraceController {
         return ApiResponse.ok("最近决策链路", traceStore.queryRecent(limit));
     }
 
+    /**
+     * 影子路由比对结果：启发式正则路由 vs LLM 自主选工具的一致率与分歧样本。
+     *
+     * <p>这是决定「能否把 HeuristicRouter 换成 LLM 自调用」的依据。看两个数：
+     * {@code agreeRate}（一致率，分母已排除解析失败）和 {@code byVerdict} 里的分歧构成 ——
+     * {@code HEURISTIC_ONLY} 多说明正则在劫持（假阳性），{@code LLM_ONLY} 多说明正则在漏判。
+     */
+    @GetMapping("/shadow-stats")
+    public ApiResponse<Map<String, Object>> shadowStats(
+            @RequestParam(value = "days", defaultValue = "7") int days,
+            @RequestParam(value = "samples", defaultValue = "20") int samples) {
+        return ApiResponse.ok("影子路由比对统计",
+                traceStore.shadowRouteStats(LocalDateTime.now().minusDays(Math.max(1, days)), samples));
+    }
+
     @GetMapping("/stats")
     public ApiResponse<Map<String, Object>> stats() {
         Map<String, Object> data = new HashMap<>();

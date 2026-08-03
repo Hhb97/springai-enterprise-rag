@@ -83,7 +83,14 @@ public class RagAppService {
                 similarityThreshold);
     }
 
-    public void rebuildBm25Index() {
+    /**
+     * 向量库数据变更后重新绑定检索器。
+     *
+     * <p>原名 {@code rebuildBm25Index}，但方法体里没有任何 BM25 —— Spring AI 2.0 GA 不含 BM25Retriever，
+     * 混合检索的关键词那一路是本类自己的线性加权实现，且它是每次查询实时算的、不存在需要重建的索引。
+     * 名字和日志都写着「刷新 BM25 倒排索引」，排障时会让人去找一个根本不存在的索引。
+     */
+    public void rebuildRetriever() {
         log.info("🔄 向量库数据有更新，重新初始化 Spring AI 2.0 DocumentRetriever...");
         this.documentRetriever = buildRetriever();
         log.info("✅ DocumentRetriever 重新绑定完成");
@@ -478,4 +485,4 @@ public class RagAppService {
                 .limit(topK)
                 .collect(Collectors.toList());
     }
-}
+}

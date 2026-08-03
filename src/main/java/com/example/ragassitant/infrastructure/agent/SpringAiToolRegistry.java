@@ -1,54 +1,49 @@
 package com.example.ragassitant.infrastructure.agent;
 
 import com.example.ragassitant.domain.model.ToolCall;
+import com.example.ragassitant.domain.service.ToolCallValidator;
 import com.example.ragassitant.domain.spi.ToolRegistryPort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
-import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
-import java.util.*;
+import java.util.HashMap;
+import java.util.Map;
 
+/**
+ * 启发式 FORCE_EXEC 路径的工具执行器：按名字反射调用 {@link DeviceTools} 上的 {@code @Tool} 方法。
+ *
+ * <p>它和 Spring AI 2.0 原生 Tool Calling 是<b>两条并行的路径</b>，不是一条：
+ * <ul>
+ *   <li>LLM 自主决定调用工具 → 由 {@code ChatClient.tools(deviceTools)} 走 Spring AI 内部实现；</li>
+ *   <li>启发式路由抢先命中（FORCE_EXEC）→ 走本类，跳过 LLM 的工具决策以省一次往返。</li>
+ * </ul>
+ * 所以本类必须自己做参数校验：Spring AI 那条路上的参数处理在这里完全不生效。
+ */
 @Component
 public class SpringAiToolRegistry implements ToolRegistryPort {
 
     private static final Logger log = LoggerFactory.getLogger(SpringAiToolRegistry.class);
 
     private final DeviceTools deviceTools;
+    private final ToolCallValidator validator;
     private final Map<String, Method> toolMethods = new HashMap<>();
-    private final Map<String, String> toolDescriptions = new LinkedHashMap<>();
 
-    public SpringAiToolRegistry(DeviceTools deviceTools) {
+    public SpringAiToolRegistry(DeviceTools deviceTools, ToolCallValidator validator) {
         this.deviceTools = deviceTools;
+        this.validator = validator;
         for (Method m : DeviceTools.class.getDeclaredMethods()) {
             if (m.isAnnotationPresent(Tool.class)) {
                 Tool ann = m.getAnnotation(Tool.class);
                 String name = ann.name().isEmpty() ? m.getName() : ann.name();
-                m.setAccessible(true);
                 toolMethods.put(name, m);
-                toolDescriptions.put(name, ann.description());
                 log.info("✅ 注册工具: {}", name);
             }
         }
         log.info("✅ ToolRegistry 初始化完成，共注册 {} 个工具", toolMethods.size());
-    }
-
-    @Override
-    public List<String> listToolNames() {
-        return new ArrayList<>(toolMethods.keySet());
-    }
-
-    @Override
-    public Map<String, String> getToolDescriptions() {
-        return new LinkedHashMap<>(toolDescriptions);
-    }
-
-    @Override
-    public String validateArguments(String toolName, Map<String, Object> arguments) {
-        return null; // 实际校验在 domain.service.ToolCallValidator
     }
 
     @Override
@@ -60,19 +55,29 @@ public class SpringAiToolRegistry implements ToolRegistryPort {
         if (method == null) {
             return "❌ 未知工具: " + toolCall.name + "，可用工具：" + toolMethods.keySet();
         }
+
+        // 先把入参按方法形参名归一化，再校验、再调用 —— 三步看到的是<b>同一份</b>参数视图。
+        // 分两套匹配规则会立刻出问题：校验器按 args.get("sn") 精确取键，若调用侧另做忽略大小写匹配，
+        // 那么 {"SN": "mv-003"} 会被校验判成「缺少 sn」而实际调用本来是取得到值的。
+        Map<String, Object> resolved = resolveArguments(method, toolCall.arguments);
+
+        // 【为什么校验必须在这里】原实现直接反射调用，参数缺失或解析失败会被 convertType 静默
+        // 兜成 0/""（days=0 → 查 0 天 → 工具回「暂无数据」），用户看到的是「没有数据」而不是
+        // 「参数不对」。把校验结果作为返回值交给 LLM，它才有机会纠正参数或向用户追问。
+        String invalid = validator.validate(toolCall.name, resolved);
+        if (invalid != null) {
+            log.warn("⚠️ 工具 {} 参数校验未通过: {} | 原始参数={}", toolCall.name, invalid, toolCall.arguments);
+            return "❌ 参数有误：" + invalid;
+        }
+
         try {
             Class<?>[] paramTypes = method.getParameterTypes();
-            Object[] args = new Object[paramTypes.length];
+            Object[] callArgs = new Object[paramTypes.length];
             for (int i = 0; i < paramTypes.length; i++) {
-                String expectedName = getExpectedParamName(method, i);
-                Object val = findArgumentValue(toolCall.arguments, expectedName, i);
-                if (val == null) {
-                    args[i] = defaultForType(paramTypes[i]);
-                } else {
-                    args[i] = convertType(val, paramTypes[i]);
-                }
+                Object val = resolved.get(parameterName(method, i));
+                callArgs[i] = val == null ? defaultForType(paramTypes[i]) : convertType(val, paramTypes[i]);
             }
-            Object ret = method.invoke(deviceTools, args);
+            Object ret = method.invoke(deviceTools, callArgs);
             return ret != null ? ret.toString() : "(工具无返回)";
         } catch (Exception e) {
             log.error("❌ 工具 {} 调用失败", toolCall.name, e);
@@ -80,30 +85,38 @@ public class SpringAiToolRegistry implements ToolRegistryPort {
         }
     }
 
-    private String getExpectedParamName(Method method, int idx) {
-        try {
-            Parameter p = method.getParameters()[idx];
-            ToolParam a = p.getAnnotation(ToolParam.class);
-            if (a != null) {
-                if (p.isNamePresent()) return p.getName();
-            }
-            if (p.isNamePresent()) return p.getName();
-        } catch (Exception ignored) {}
-        return "arg" + idx;
+    /** 依赖 {@code -parameters} 编译参数保留形参名；拿不到时退化为 argN。 */
+    private String parameterName(Method method, int idx) {
+        Parameter p = method.getParameters()[idx];
+        return p.isNamePresent() ? p.getName() : "arg" + idx;
     }
 
-    private Object findArgumentValue(Map<String, Object> arguments, String expectedName, int idx) {
-        if (arguments == null) return null;
-        if (arguments.containsKey(expectedName)) return arguments.get(expectedName);
-        for (Map.Entry<String, Object> e : arguments.entrySet()) {
-            String k = e.getKey().toLowerCase(Locale.ROOT);
-            String en = expectedName.toLowerCase(Locale.ROOT);
-            if (k.equals(en) || k.contains(en) || en.contains(k)) {
-                return e.getValue();
+    /**
+     * 把调用方传来的参数重新按方法形参名建索引，匹配不上的一律丢弃（后续由校验层报「缺少参数」）。
+     *
+     * <p>只做「精确匹配 → 忽略大小写匹配」两级，<b>不做</b>模糊包含匹配，也<b>不做</b>位置兜底。
+     * 原实现用双向 {@code contains} 匹配再按下标硬塞：{@code query_energy_by_date_range}
+     * 收到一个名为 {@code date} 的参数时，{@code "startDate".contains("date")} 成立，会把它填进 startDate；
+     * 名字全对不上时还会按顺序依次填。宁可缺参数被明确报错，也不要猜错槽位还照样执行 ——
+     * 后者产出的是「看起来完全正常」的错误数据，没有任何人能发现。
+     */
+    private Map<String, Object> resolveArguments(Method method, Map<String, Object> arguments) {
+        Map<String, Object> resolved = new HashMap<>();
+        if (arguments == null || arguments.isEmpty()) return resolved;
+        for (int i = 0; i < method.getParameterCount(); i++) {
+            String name = parameterName(method, i);
+            if (arguments.containsKey(name)) {
+                resolved.put(name, arguments.get(name));
+                continue;
+            }
+            for (Map.Entry<String, Object> e : arguments.entrySet()) {
+                if (e.getKey() != null && e.getKey().equalsIgnoreCase(name)) {
+                    resolved.put(name, e.getValue());
+                    break;
+                }
             }
         }
-        List<Object> values = new ArrayList<>(arguments.values());
-        return idx < values.size() ? values.get(idx) : null;
+        return resolved;
     }
 
     private Object defaultForType(Class<?> t) {
@@ -115,7 +128,6 @@ public class SpringAiToolRegistry implements ToolRegistryPort {
     }
 
     private Object convertType(Object val, Class<?> target) {
-        if (val == null) return null;
         if (target.isInstance(val)) return val;
         String str = val.toString().trim();
         if (target == String.class) return str;
@@ -132,9 +144,5 @@ public class SpringAiToolRegistry implements ToolRegistryPort {
             return "true".equalsIgnoreCase(str) || "1".equals(str) || "yes".equalsIgnoreCase(str);
         }
         return val;
-    }
-
-    private static class ObjectMapperHolder {
-        // 预留位：JSON 序列化扩展
     }
 }
