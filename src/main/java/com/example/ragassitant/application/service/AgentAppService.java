@@ -1,5 +1,6 @@
 package com.example.ragassitant.application.service;
 
+import com.example.ragassitant.common.trace.TraceIdFilter;
 import com.example.ragassitant.domain.model.DocumentChunk;
 import com.example.ragassitant.domain.model.ToolCall;
 import com.example.ragassitant.domain.service.HeuristicRouter;
@@ -17,6 +18,7 @@ import com.example.ragassitant.infrastructure.config.AgentProperties.Heuristic.S
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -105,6 +107,18 @@ public class AgentAppService {
     }
 
     public ChatResponse chat(String question, String sessionId, boolean useRag, boolean enableHybridSearch, Integer customTopK) {
+        // 放进 MDC 供 TracingToolCallback 取用：原生 Tool Calling 在框架内部循环里执行工具，
+        // 回调拿不到会话上下文，但它跑在同一个请求线程上，MDC 是最轻的传递方式。
+        MDC.put(TraceIdFilter.SESSION_ID_KEY, sessionId == null ? "" : sessionId);
+        try {
+            return doChat(question, sessionId, useRag, enableHybridSearch, customTopK);
+        } finally {
+            MDC.remove(TraceIdFilter.SESSION_ID_KEY);
+        }
+    }
+
+    private ChatResponse doChat(String question, String sessionId, boolean useRag,
+                                boolean enableHybridSearch, Integer customTopK) {
         log.info("🤖 Agent 处理问题: sessionId={}, useRag={}, hybrid={}, topK={}, question={}",
                 sessionId, useRag, enableHybridSearch, customTopK, question);
 
@@ -183,6 +197,11 @@ public class AgentAppService {
         long toolStart = System.currentTimeMillis();
         log.info("🎯[{}] 执行工具 {}({})", strategy, forcedTool.name, forcedTool.arguments);
 
+        // heuristicHit 只在「确实是启发式命中」时为 true。
+        // 文本兜底那条路是模型自己决定要调工具、只是没走原生通道，记成启发式命中会直接污染
+        // 追踪页那个「FORCE_EXEC 跳过 LLM 的比例」指标 —— 而那个比例正是判断该不该删掉正则路由的依据。
+        boolean heuristicHit = "FORCE_EXEC".equals(strategy);
+
         String forcedResult;
         String toolErr = null;
         try {
@@ -195,7 +214,7 @@ public class AgentAppService {
         log.info("🎯[{}] 工具 {} 执行完毕，结果长度={}", strategy, forcedTool.name, forcedResult == null ? 0 : forcedResult.length());
         traceStore.recordDecision(sessionId, 1, "HEURISTIC_TOOL",
                 forcedTool.name, forcedTool.arguments, forcedResult,
-                null, null, true, strategy,
+                null, null, heuristicHit, strategy,
                 toolMs, toolErr == null ? "OK" : "ERROR", toolErr);
 
         List<MessageDTO> messages = buildBaseMessages(history);
@@ -216,11 +235,11 @@ public class AgentAppService {
         traceStore.recordDecision(sessionId, 1, "LLM_SUMMARY",
                 null, null, null,
                 messages.size() + " messages", summary,
-                true, strategy,
+                heuristicHit, strategy,
                 llmMs, "OK", null);
         log.info("✅[{}] 流程结束：最终回答长度={}", strategy, answer.length());
 
-        return finish(sessionId, question, answer, sources, strategy, true, null, "OK", null);
+        return finish(sessionId, question, answer, sources, strategy, heuristicHit, null, "OK", null);
     }
 
     // ==================== 路径三：RAG + 原生自动 Tool Calling ====================
