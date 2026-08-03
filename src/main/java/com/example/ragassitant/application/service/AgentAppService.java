@@ -13,6 +13,7 @@ import com.example.ragassitant.infrastructure.agent.DeviceTools;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -30,6 +31,10 @@ public class AgentAppService {
     private enum HeuristicStrategy { FORCE_EXEC, RECOMMEND_LLM }
     private static final HeuristicStrategy HEURISTIC_STRATEGY = HeuristicStrategy.FORCE_EXEC;
 
+    /** LLM 不可用时的问候兜底，保证闲聊短路不会返回空串。 */
+    private static final String SMALL_TALK_FALLBACK =
+            "您好！我是智能运维助手，可以帮您查询设备清单与详情、分析能耗数据，也能基于知识库回答业务问题。请问需要什么帮助？";
+
     private final LlmPort llmPort;
     private final VectorStorePort vectorStorePort;
     private final ConversationStorePort conversationStorePort;
@@ -44,6 +49,14 @@ public class AgentAppService {
     // Spring AI 2.0 官方 @Tool 注解的 Bean，ChatClient.tools(deviceTools) 自动识别 6 个工具
     private final DeviceTools deviceTools;
 
+    /**
+     * 纯知识库模式：{@code true} 时禁用启发式强制路由（FORCE_EXEC）与自动 Tool Calling，
+     * 所有问题只走 RAG，检索不到就明确回答「知识库暂无相关信息」。
+     *
+     * <p>默认 {@code false} —— 打开会让设备清单/能耗查询能力整体失效，必须是显式选择。
+     */
+    private final boolean pureKnowledgeMode;
+
     public AgentAppService(LlmPort llmPort,
                            VectorStorePort vectorStorePort,
                            ConversationStorePort conversationStorePort,
@@ -55,7 +68,8 @@ public class AgentAppService {
                            AgentTraceStorePort traceStore,
                            RagAppService ragAppService,
                            QueryRewriteService queryRewriteService,
-                           DeviceTools deviceTools) {
+                           DeviceTools deviceTools,
+                           @Value("${rag.pure-knowledge-mode:false}") boolean pureKnowledgeMode) {
         this.llmPort = llmPort;
         this.vectorStorePort = vectorStorePort;
         this.conversationStorePort = conversationStorePort;
@@ -68,7 +82,9 @@ public class AgentAppService {
         this.ragAppService = ragAppService;
         this.queryRewriteService = queryRewriteService;
         this.deviceTools = deviceTools;
-        log.info("✅ AgentAppService 初始化完成（Spring AI 2.0 官方自动 Tool Calling Agent，不再手写 for 循环）");
+        this.pureKnowledgeMode = pureKnowledgeMode;
+        log.info("✅ AgentAppService 初始化完成（Spring AI 2.0 官方自动 Tool Calling Agent，不再手写 for 循环），纯知识库模式={}",
+                pureKnowledgeMode);
     }
 
     public ChatResponse chat(String question, String sessionId, boolean useRag, boolean enableHybridSearch, Integer customTopK) {
@@ -87,6 +103,42 @@ public class AgentAppService {
             }
         }
 
+        // ===== 闲聊短路：必须在「改写 / 路由 / 检索」三者之前 =====
+        // 【线上事故】用户第一句问「列出所有设备」（命中工具、跳过检索、回答正确），
+        // 第二句只说了「你好」→ 未命中工具 → 进入 RAG → 检索无相似度下限，必然召回电能质量 FAQ
+        // → FAQ 以「## 知识库参考内容」的名义拼进提示词 → 模型回「我已经阅读了知识库中的内容…」
+        // 并把 FAQ 表格整段总结了一遍。用户看到的是一次没人问过的知识库问答。
+        //
+        // 这三条链路对一句问候都是有害的，所以一起跳过：
+        //   改写：「你好」只有 2 字必然过长度门禁，可能被补全成设备查询（已在门禁层另行拦截）
+        //   路由：问候不该触发任何工具
+        //   检索：问候和任何文档的相似度都很低，召回结果只会污染上下文
+        if (HeuristicRouter.isSmallTalk(question)) {
+            log.info("💬 闲聊/问候短路（Agent 链路）：跳过 Query 改写、启发式路由、向量检索、Tool Calling → question={}", question);
+            // 不带历史：上一轮的设备表格留在上下文里，模型很容易顺手把它再总结一遍。
+            // 问候不需要任何上下文，给最干净的输入。
+            List<MessageDTO> smallTalkMessages = List.of(
+                    new MessageDTO(Role.SYSTEM, promptBuilder.buildSmallTalkSystemPrompt()),
+                    new MessageDTO(Role.USER, question));
+
+            long smallTalkStart = System.currentTimeMillis();
+            String reply = callLLM(smallTalkMessages);
+            long smallTalkMs = System.currentTimeMillis() - smallTalkStart;
+            String smallTalkAnswer = (reply == null || reply.isBlank()) ? SMALL_TALK_FALLBACK : cleanupAnswer(reply);
+            if (smallTalkAnswer.isBlank()) smallTalkAnswer = SMALL_TALK_FALLBACK;
+
+            traceStore.recordDecision(sessionId, 1, "SMALL_TALK",
+                    null, null, null,
+                    question, smallTalkAnswer,
+                    false, "SMALL_TALK_SHORT_CIRCUIT",
+                    smallTalkMs, "OK", null);
+            if (sessionId != null && !sessionId.isBlank()) {
+                conversationStorePort.saveUser(sessionId, question);
+                conversationStorePort.saveAssistant(sessionId, smallTalkAnswer);
+            }
+            return new ChatResponse(smallTalkAnswer, List.of());
+        }
+
         // ===== 两段式路由 =====
         //   ① 原问题直接 route（零成本，覆盖绝大多数场景）
         //   ② 上下文消解后再 route —— 优先用 LLM 改写；改写被关闭时才退回历史拼接启发式
@@ -98,13 +150,15 @@ public class AgentAppService {
         // 改写认为「这是新话题、原样输出」时，不再让拼接推翻它。
         ToolCall forcedTool = null;
         String retrievalQuery = question;
-        if (ENABLE_HEURISTIC_ROUTE) {
-            forcedTool = heuristicRouter.route(question);
+        // 纯知识库模式下不做工具路由，但 Query 改写仍然需要（多轮追问的指代消解对检索同样重要）
+        boolean routeEnabled = ENABLE_HEURISTIC_ROUTE && !pureKnowledgeMode;
+        if (routeEnabled || (pureKnowledgeMode && !history.isEmpty())) {
+            if (routeEnabled) forcedTool = heuristicRouter.route(question);
 
             if (forcedTool == null && !history.isEmpty()) {
                 if (queryRewriteService.isEnabled()) {
                     retrievalQuery = queryRewriteService.rewrite(question, history, sessionId).get(0);
-                    if (!retrievalQuery.equals(question)) {
+                    if (routeEnabled && !retrievalQuery.equals(question)) {
                         ToolCall rewrittenTool = heuristicRouter.route(retrievalQuery);
                         if (rewrittenTool != null) {
                             forcedTool = rewrittenTool;
@@ -112,7 +166,7 @@ public class AgentAppService {
                                     question, retrievalQuery, forcedTool.name, forcedTool.arguments);
                         }
                     }
-                } else {
+                } else if (routeEnabled) {
                     forcedTool = routeByHistoryConcat(question, history);
                 }
             }
@@ -184,9 +238,17 @@ public class AgentAppService {
             try {
                 int effectiveTopK = customTopK != null && customTopK > 0 ? customTopK : 4;
                 List<DocumentChunk> docs = ragAppService.retrieveDocuments(retrievalQuery, enableHybridSearch, effectiveTopK);
+                // 【幻觉防护】丢弃 min-keep-chunks 的保底块。
+                // 保底块是「相似度全部低于阈值时最不差的那一块」，本质仍是无关文档；
+                // 纯 RAG 链路靠低置信度提示词兜着它，Agent 链路没这个必要 ——
+                // 这里还有工具调用和常识问答能力，宁可上下文为空也不要注入无关文档。
+                if (docs != null && RagAppService.isAllBelowThreshold(docs)) {
+                    log.info("🚧 召回 {} 块全部低于相似度阈值，Agent 链路不注入知识库上下文", docs.size());
+                    docs = List.of();
+                }
                 if (docs != null && !docs.isEmpty()) {
                     StringBuilder ragContext = new StringBuilder();
-                    ragContext.append("## 知识库参考内容\n\n");
+                    ragContext.append(promptBuilder.buildRetrievedContextHeader());
                     for (int i = 0; i < docs.size(); i++) {
                         DocumentChunk doc = docs.get(i);
                         ragContext.append("**[").append(i + 1).append("]** ").append(doc.getText()).append("\n\n");
@@ -209,7 +271,7 @@ public class AgentAppService {
         messages.add(new MessageDTO(Role.USER, userContent));
 
         // ===== 启发式路由 RECOMMEND_LLM / 未命中分支 =====
-        if (ENABLE_HEURISTIC_ROUTE) {
+        if (routeEnabled) {
             if (forcedTool != null) {
                 if (HEURISTIC_STRATEGY != HeuristicStrategy.FORCE_EXEC) {
                     log.info("💡[RECOMMEND_LLM] 启发式命中 → 推荐工具 {}({})（最终由 LLM 决定）", forcedTool.name, forcedTool.arguments);
@@ -229,6 +291,8 @@ public class AgentAppService {
             } else {
                 log.info("🟡 启发式未命中，交由 Spring AI 2.0 ChatClient 自动 Tool Calling（无需手写 for）");
             }
+        } else if (pureKnowledgeMode) {
+            log.info("📚 纯知识库模式：已禁用启发式工具路由与自动 Tool Calling，仅依据检索结果回答");
         } else {
             log.info("⚪ 启发式路由已关闭，完全由 Spring AI 2.0 ChatClient 自动 Tool Calling");
         }
@@ -240,11 +304,16 @@ public class AgentAppService {
         long agentStart = System.currentTimeMillis();
         traceStore.recordDecision(sessionId, 1, "LLM_AGENT_AUTO_LOOP_START",
                 null, null, null,
-                messages.size() + " messages", "Spring AI 2.0 ChatClient.tools(DeviceTools)",
-                false, "SPRING_AI_2_AUTO",
+                messages.size() + " messages",
+                pureKnowledgeMode ? "纯知识库模式：不注册工具" : "Spring AI 2.0 ChatClient.tools(DeviceTools)",
+                false, pureKnowledgeMode ? "PURE_KNOWLEDGE" : "SPRING_AI_2_AUTO",
                 null, "OK", null);
 
-        String modelOutput = llmPort.chatWithAutoToolCalling(messages, MAX_TOOL_CALLS, List.of(deviceTools));
+        // 纯知识库模式走不带工具的普通对话：ChatClient.tools() 传空数组的行为依版本而异，
+        // 与其赌它容忍空工具集，不如明确走另一条不涉及工具的接口。
+        String modelOutput = pureKnowledgeMode
+                ? llmPort.chatWithRawMessages(messages)
+                : llmPort.chatWithAutoToolCalling(messages, MAX_TOOL_CALLS, List.of(deviceTools));
         long agentMs = System.currentTimeMillis() - agentStart;
 
         if (modelOutput == null || modelOutput.isBlank()) {

@@ -126,6 +126,26 @@ class QueryRewriteServiceTest {
     }
 
     @Test
+    @DisplayName("闲聊/问候不触发改写")
+    void skipsSmallTalk() {
+        // 「你好」只有 2 个字，必然命中「短问句」门禁；一旦被改写，模型只要输出「设备」
+        // 就会命中 list_devices 并 FORCE_EXEC —— 用户说句问候，系统甩回一张设备表。
+        assertFalse(QueryRewriteService.needsRewrite("你好"));
+        assertFalse(QueryRewriteService.needsRewrite("谢谢"));
+        assertFalse(QueryRewriteService.needsRewrite("你是什么大模型"));
+    }
+
+    @Test
+    @DisplayName("闲聊有历史时也不调 LLM 改写")
+    void smallTalkNeverReachesLlm() {
+        StubLlm llm = StubLlm.returning("设备");
+        QueryRewriteService svc = service(llm, new RecordingTraceStore());
+
+        assertEquals(List.of("你好"), svc.rewrite("你好", history("列出所有设备", "共 8 台设备…"), "s1"));
+        assertEquals(0, llm.calls, "闲聊不应产生改写调用");
+    }
+
+    @Test
     @DisplayName("首轮无历史时完全不调 LLM")
     void skipsWhenNoHistory() {
         StubLlm llm = StubLlm.returning("不该被调用");

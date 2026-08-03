@@ -1,5 +1,6 @@
 package com.example.ragassitant.application.service;
 
+import com.example.ragassitant.domain.service.HeuristicRouter;
 import com.example.ragassitant.domain.service.PromptBuilder;
 import com.example.ragassitant.domain.spi.AgentTraceStorePort;
 import com.example.ragassitant.domain.spi.LlmPort;
@@ -140,6 +141,12 @@ public class QueryRewriteService {
     static boolean needsRewrite(String question) {
         if (question == null || question.isBlank()) return false;
         String q = question.strip();
+
+        // 闲聊/问候没有可补全的语义，却因为「短」必然命中下面的长度门禁。
+        // 【踩过的坑】「你好」只有 2 个字 → 判定需要改写 → 连同「列出所有设备」的历史一起送去改写；
+        // 模型只要输出「设备」（2 字，远在 maxLengthRatio 之内，后处理拦不住）就会命中 list_devices
+        // 并 FORCE_EXEC —— 用户说了句「你好」，系统甩回一张设备表。这类问句必须在门禁就挡掉。
+        if (HeuristicRouter.isSmallTalk(q)) return false;
 
         // 已带完整 SN 的问句信息足够，不需要补全
         if (SELF_CONTAINED_ENTITY.matcher(q).find()) return false;
