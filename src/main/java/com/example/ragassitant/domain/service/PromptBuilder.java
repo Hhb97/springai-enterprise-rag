@@ -1,6 +1,9 @@
 package com.example.ragassitant.domain.service;
 
+import com.example.ragassitant.domain.model.DocumentChunk;
 import org.springframework.beans.factory.annotation.Value;
+
+import java.util.List;
 
 public class PromptBuilder {
 
@@ -203,5 +206,76 @@ public class PromptBuilder {
         }
         return "工具执行时发现参数问题：\n" + toolResults +
                 "\n\n请按照提示修正参数，或者引导用户补充信息。";
+    }
+
+    public String buildReActSystemPrompt(String toolCatalog, List<DocumentChunk> docs) {
+        String role = agentRole != null ? agentRole : "你是智能运维助手";
+        StringBuilder sb = new StringBuilder();
+        sb.append("# 角色\n").append(role).append("\n\n");
+        sb.append("你是基于 **ReAct（Reasoning + Acting）推理循环** 的智能运维助手。\n");
+        sb.append("每次回复必须严格输出 **一个 JSON 对象**，禁止输出其他格式！\n\n");
+
+        sb.append("# 可用工具 Tool Catalog\n");
+        sb.append("---\n");
+        sb.append(toolCatalog != null ? toolCatalog : "（暂无可用工具）");
+        sb.append("\n---\n\n");
+
+        sb.append("# 知识库参考资料 RAG Context\n");
+        sb.append("---\n");
+        if (docs != null && !docs.isEmpty()) {
+            for (int i = 0; i < docs.size(); i++) {
+                DocumentChunk doc = docs.get(i);
+                sb.append("**[").append(i + 1).append("]** ");
+                String t = doc.getText() == null ? "" : doc.getText().replace("\n", " ").trim();
+                if (t.length() > 400) t = t.substring(0, 400) + "...";
+                sb.append(t).append("\n\n");
+            }
+        } else {
+            sb.append("（本次未检索到相关知识库资料）\n\n");
+        }
+        sb.append("---\n\n");
+
+        sb.append("# ReAct 工作流程\n\n");
+        sb.append("```\n");
+        sb.append(" Thought（思考分析） → Action（调用工具） → Observation（观察结果）\n");
+        sb.append("         ↑______________________ 重复循环直到信息足够\n");
+        sb.append("                                ↓\n");
+        sb.append("                    Final Answer（输出最终回答）\n");
+        sb.append("```\n\n");
+
+        sb.append("# 严格输出格式\n\n");
+        sb.append("每一步都只输出一个 JSON 对象（不要输出 JSON 之外的任何文字）。以下是两种合法格式：\n\n");
+
+        sb.append("## 格式 A：需要调用工具（继续循环）\n");
+        sb.append("```json\n");
+        sb.append("{\n");
+        sb.append("  \"thought\": \"<你的思考过程：用户问了什么、已有哪些信息、为什么需要调这个工具>\",\n");
+        sb.append("  \"tool\": \"<工具名，必须来自上面的 Tool Catalog>\",\n");
+        sb.append("  \"arguments\": { \"<参数1>\": \"<值1>\", \"<参数2>\": \"<值2>\" },\n");
+        sb.append("  \"answer\": null\n");
+        sb.append("}\n");
+        sb.append("```\n\n");
+
+        sb.append("## 格式 B：信息足够 / 不需要工具（给出最终回答）\n");
+        sb.append("```json\n");
+        sb.append("{\n");
+        sb.append("  \"thought\": \"<你的思考过程：为什么可以直接回答，基于哪些资料或结果>\",\n");
+        sb.append("  \"tool\": null,\n");
+        sb.append("  \"arguments\": {},\n");
+        sb.append("  \"answer\": \"<你的最终回答，用中文自然语言，基于工具结果或知识库资料，表格格式规范>\",\n");
+        sb.append("}\n");
+        sb.append("```\n\n");
+
+        sb.append("# 必须遵守的规则\n\n");
+        sb.append("1. **输出严格是单个 JSON**：thought、tool、arguments、answer 四个字段必须齐全，tool=null 时 answer 必填，反之亦然。\n");
+        sb.append("2. **禁止编造参数**：参数只能来自用户问题、对话历史或工具返回结果，SN 号、日期等不确定时不要瞎填，改用 null 或引导用户补充。\n");
+        sb.append("3. **禁止编造数据**：回答中出现的设备数据、能耗数值必须来自工具返回结果；文档类回答必须来自上方 RAG 参考资料。\n");
+        sb.append("4. **工具只能调一个**：每一轮只调用一次工具，结果拿到后再决定下一步。\n");
+        sb.append("5. **不要重复相同工具**：同样参数的工具调用过一次就不要再次调用。\n");
+        sb.append("6. **引用知识库**：若回答基于 RAG 资料第 N 条，可以在段落末尾标 [N]。\n");
+        sb.append("7. **最终回答用中文自然语言**：整理成易读的表格、列表或段落，不要直接贴原始 JSON。\n\n");
+
+        sb.append("现在开始！收到用户消息后，严格按上述 JSON 格式回复第一步。\n");
+        return sb.toString();
     }
 }

@@ -714,6 +714,82 @@
     30% { transform: translateY(-6px); opacity: 1; }
   }
 
+  /* ========= ReAct Steps ========= */
+  .react-box { margin-top: 14px; background: rgba(139,92,246,0.05); border: 1px solid rgba(139,92,246,0.18); border-radius: 10px; overflow: hidden; }
+  .react-header, .compare-header {
+    display: flex; align-items: center; gap: 6px; padding: 10px 14px;
+    background: rgba(139,92,246,0.1); font-weight: 600; font-size: 13px;
+    color: #6d28d9; cursor: pointer; user-select: none;
+  }
+  .react-header svg, .sources-header svg { margin-left: auto; transition: transform .15s; }
+  .react-steps { padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+  .react-step {
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04); overflow: hidden;
+  }
+  .react-step-header {
+    display: flex; align-items: center; padding: 8px 12px;
+    background: linear-gradient(135deg, rgba(139,92,246,0.08), rgba(59,130,246,0.08));
+    border-bottom: 1px solid var(--border); font-size: 12px; gap: 8px;
+  }
+  .react-step-num {
+    font-weight: 700; color: #6d28d9;
+    background: rgba(139,92,246,0.15); padding: 2px 10px; border-radius: 999px;
+  }
+  .react-meta { margin-left: auto; color: var(--text-muted); }
+  .react-step-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+  .react-thought, .react-action, .react-observation, .react-error {
+    display: flex; gap: 10px; font-size: 13px; line-height: 1.65;
+  }
+  .react-thought > span, .react-action > span, .react-observation > span, .react-error > span {
+    font-size: 15px; flex-shrink: 0; margin-top: 1px;
+  }
+  .react-thought { background: #fdf4ff; padding: 8px 10px; border-radius: 8px; color: #581c87; }
+  .react-action { background: #eff6ff; padding: 8px 10px; border-radius: 8px; color: #1e3a8a; }
+  .react-tool-name { font-weight: 700; font-family: ui-monospace,Menlo,Consolas,monospace; }
+  .react-tool-args, .react-obs-body {
+    margin-top: 6px; background: rgba(0,0,0,0.85); color: #e5e7eb;
+    padding: 8px 10px; border-radius: 6px; font-size: 12px;
+    max-height: 160px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  .react-observation {
+    background: #ecfdf5; padding: 8px 10px; border-radius: 8px; color: #064e3b; cursor: pointer;
+  }
+  .react-obs-title { font-size: 11px; color: #10b981; font-weight: 600; margin-bottom: 4px; }
+  .react-observation.collapsed .react-obs-body { display: none; }
+  .react-error { background: #fef2f2; padding: 8px 10px; border-radius: 8px; color: #7f1d1d; }
+
+  /* ========= Compare ========= */
+  .compare-box { margin-top: 14px; background: #fff; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+  .compare-header { background: linear-gradient(135deg, rgba(59,130,246,0.08), rgba(16,185,129,0.08)); color: #1e293b; cursor: default; }
+  .compare-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+    border-top: 1px solid var(--border);
+  }
+  .compare-col { min-width: 0; }
+  .compare-col + .compare-col { border-left: 1px solid var(--border); }
+  .compare-col-header {
+    padding: 10px 14px; font-size: 13px; display: flex; align-items: center; justify-content: space-between;
+    background: #fafafa; border-bottom: 1px solid var(--border);
+  }
+  .compare-col-header.agent-bg { background: linear-gradient(135deg, rgba(59,130,246,0.1), transparent); }
+  .compare-col-header.react-bg { background: linear-gradient(135deg, rgba(139,92,246,0.1), transparent); }
+  .compare-col-header b { font-size: 14px; }
+  .compare-col-header span { color: var(--text-muted); }
+  .compare-col-body { padding: 14px; font-size: 13px; line-height: 1.75; max-height: 70vh; overflow: auto; }
+  @media (max-width: 768px) {
+    .compare-grid { grid-template-columns: 1fr; }
+    .compare-col + .compare-col { border-left: none; border-top: 1px solid var(--border); }
+  }
+
+  /* ========= Stats Bar ========= */
+  .stats-bar {
+    margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 6px 10px; border-radius: 8px;
+    background: #f8fafc; border: 1px solid var(--border);
+    font-size: 11px; color: var(--text-muted);
+  }
+
   /* Cursor */
   .cursor {
     display: inline-block;
@@ -922,6 +998,12 @@
         <div class="mode-btn active" id="modeAgent" onclick="setMode('agent')">
           <span>⚡</span> Agent
         </div>
+        <div class="mode-btn" id="modeReAct" onclick="setMode('react')">
+          <span>🧠</span> ReAct
+        </div>
+        <div class="mode-btn" id="modeCompare" onclick="setMode('compare')">
+          <span>⚖️</span> 对比
+        </div>
         <div class="mode-btn" id="modeRag" onclick="setMode('rag')">
           <span>📚</span> 知识库
         </div>
@@ -1123,7 +1205,20 @@
     if (isGenerating) return;
     currentMode = mode;
     $('modeAgent').classList.toggle('active', mode === 'agent');
+    $('modeReAct').classList.toggle('active', mode === 'react');
+    $('modeCompare').classList.toggle('active', mode === 'compare');
     $('modeRag').classList.toggle('active', mode === 'rag');
+    const subtitleMap = {
+      agent: 'Spring AI 2.0 · Agent 工具模式（黑盒）',
+      react: 'ReAct 推理模式 · 手写循环 · 每步可见',
+      compare: '两两对比模式 · Agent vs ReAct',
+      rag: 'Spring AI 2.0 · RAG 知识库模式'
+    };
+    const subEl = document.querySelector('.sidebar-subtitle');
+    if (subEl) subEl.textContent = subtitleMap[mode] || subtitleMap.agent;
+    if (inputEl) inputEl.placeholder = mode === 'compare'
+        ? '对比模式：输入问题后，Agent 与 ReAct 将同时回答...'
+        : '有什么可以帮你的？输入问题或指令...';
   }
 
   // ============== Render ==============
@@ -1148,11 +1243,18 @@
     topbarTitle.textContent = chat.title || '新对话';
 
     if (!chat.messages || chat.messages.length === 0) {
+      const modeConfig = {
+        agent:   { logo: '🤖', title: '你好，我是智能运维助手（Agent）',  subtitle: 'Spring AI 2.0 · 原生 Tool Calling · 黑盒循环' },
+        react:   { logo: '🧠', title: '你好，我是 ReAct 推理助手',        subtitle: '手写 Thought → Action → Observation 循环 · 每步可见' },
+        compare: { logo: '⚖️', title: '两两对比验证：Agent vs ReAct',     subtitle: '同一个问题 · 两种模式 · 同时回答 · 直观对比效果' },
+        rag:     { logo: '📚', title: '你好，我是知识库助手',              subtitle: '纯 RAG 检索 · 基于文档回答' }
+      }[currentMode] || { logo: '🤖', title: '你好，我是智能运维助手', subtitle: '支持知识库问答 · Agent 工具调用 · 设备查询与能耗分析' };
+
       chatContentEl.innerHTML = `
         <div class="welcome">
-          <div class="welcome-logo">🤖</div>
-          <h1 class="welcome-title">你好，我是智能运维助手</h1>
-          <p class="welcome-subtitle">支持知识库问答 · Agent 工具调用 · 设备查询与能耗分析</p>
+          <div class="welcome-logo">${modeConfig.logo}</div>
+          <h1 class="welcome-title">${modeConfig.title}</h1>
+          <p class="welcome-subtitle">${modeConfig.subtitle}</p>
 
           <div class="suggest-grid">
             <div class="suggest-card" onclick="fillAndSend('列出所有设备')">
@@ -1217,9 +1319,19 @@
     const avatar = isUser
       ? '<div class="avatar user">我</div>'
       : '<div class="avatar bot">🤖</div>';
-    const content = isUser
-      ? escapeHtml(m.content).replace(/\n/g, '<br>')
-      : renderMarkdown(m.content) + (m.sources && m.sources.length ? renderSources(m.sources) : '');
+
+    let content;
+    if (isUser) {
+      content = escapeHtml(m.content).replace(/\n/g, '<br>');
+    } else if (m.compare) {
+      content = renderCompare(m.compare);
+    } else {
+      content = renderMarkdown(m.content);
+      if (m.steps && m.steps.length) content += renderReActSteps(m.steps);
+      if (m.sources && m.sources.length) content += renderSources(m.sources);
+      const meta = { stepCount: m.stepCount, totalMs: m.totalMs, queryRewritten: m.queryRewritten, mode: m.mode };
+      content += renderStatsBar(meta);
+    }
 
     const tools = isUser ? `
       <div class="message-tools">
@@ -1264,6 +1376,102 @@
       </div>
       <div class="sources-list" hidden>${items}</div>
     </div>`;
+  }
+
+  function renderReActSteps(steps) {
+    if (!steps || !steps.length) return '';
+    const stepsHtml = steps.map(s => {
+      const duration = s.durationMs != null ? `<span class="react-meta">⏱️ ${s.durationMs}ms</span>` : '';
+      const thought = s.thought ? `<div class="react-thought"><span>💭</span><div>${escapeHtml(s.thought)}</div></div>` : '';
+      const tool = s.tool ? `
+        <div class="react-action">
+          <span>🔧</span>
+          <div>
+            <div class="react-tool-name">${escapeHtml(s.tool)}</div>
+            ${s.arguments != null && Object.keys(s.arguments).length ? `<pre class="react-tool-args">${escapeHtml(JSON.stringify(s.arguments, null, 2))}</pre>` : ''}
+          </div>
+        </div>` : '';
+      const obs = s.observation != null ? `
+        <div class="react-observation" onclick="this.classList.toggle('collapsed')">
+          <span>👁️</span>
+          <div>
+            <div class="react-obs-title">观察结果（点击展开/折叠）</div>
+            <pre class="react-obs-body">${escapeHtml(typeof s.observation === 'string' ? s.observation : JSON.stringify(s.observation, null, 2))}</pre>
+          </div>
+        </div>` : '';
+      const err = s.error ? `<div class="react-error"><span>❌</span><div>${escapeHtml(s.error)}</div></div>` : '';
+      return `
+        <div class="react-step">
+          <div class="react-step-header">
+            <div class="react-step-num">Step ${s.step}</div>
+            ${duration}
+          </div>
+          <div class="react-step-body">
+            ${thought}${tool}${obs}${err}
+          </div>
+        </div>`;
+    }).join('');
+    return `
+      <div class="react-box">
+        <div class="react-header" onclick="this.nextElementSibling.hidden = !this.nextElementSibling.hidden">
+          🧠 ReAct 推理步骤 (${steps.length})
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="react-steps">${stepsHtml}</div>
+      </div>`;
+  }
+
+  function renderCompare(compareData) {
+    if (!compareData) return '';
+    const a = compareData.agent || {};
+    const r = compareData.react || {};
+    const badge = (ok) => ok
+      ? '<span style="color:#10b981">✓ 成功</span>'
+      : '<span style="color:#ef4444">✗ 失败</span>';
+    const aSources = renderSources(a.sources || []);
+    const rSteps = renderReActSteps(r.steps || []);
+    const rSources = renderSources(r.sources || []);
+    return `
+      <div class="compare-box">
+        <div class="compare-header">
+          ⚖️ 两两对比结果 · Agent vs ReAct
+          <span style="font-size:12px;color:var(--text-muted);margin-left:auto">总耗时: ${compareData.totalMs || '-'} ms</span>
+        </div>
+        <div class="compare-grid">
+          <div class="compare-col">
+            <div class="compare-col-header agent-bg">
+              <div><b>⚡ Agent</b> <span style="font-size:11px">Spring AI 原生 · 黑盒</span></div>
+              <div style="font-size:12px">${badge(a.success)} · ⏱️ ${a.elapsedMs || 0}ms</div>
+            </div>
+            <div class="compare-col-body">
+              ${(a.answer || '').replace(/\n/g, '<br>')}
+              ${aSources}
+            </div>
+          </div>
+          <div class="compare-col">
+            <div class="compare-col-header react-bg">
+              <div><b>🧠 ReAct</b> <span style="font-size:11px">手写循环 · 每步可见</span></div>
+              <div style="font-size:12px">${badge(r.success)} · ⏱️ ${r.elapsedMs || 0}ms · 🪜 ${r.stepCount || 0} 步</div>
+            </div>
+            <div class="compare-col-body">
+              ${(r.answer || '').replace(/\n/g, '<br>')}
+              ${rSteps}
+              ${rSources}
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function renderStatsBar(meta) {
+    if (!meta) return '';
+    const parts = [];
+    if (meta.stepCount != null) parts.push(`🪜 ${meta.stepCount} 步推理`);
+    if (meta.totalMs) parts.push(`⏱️ ${meta.totalMs}ms`);
+    if (meta.queryRewritten) parts.push('🔄 查询已改写');
+    if (meta.mode === 'react') parts.push('🧠 ReAct');
+    if (!parts.length) return '';
+    return `<div class="stats-bar">${parts.join(' · ')}</div>`;
   }
 
   // ============== Message actions ==============
@@ -1341,12 +1549,18 @@
     }
 
     try {
-      const endpoint = currentMode === 'agent' ? '/ai/agent-chat' : '/ai/chat';
+      const endpointMap = {
+        agent: '/ai/agent-chat',
+        react: '/ai/react-agent-chat',
+        compare: '/ai/compare-chat',
+        rag: '/ai/chat'
+      };
+      const endpoint = endpointMap[currentMode] || '/ai/chat';
       const payload = {
         question: text,
         enableHybridSearch: $('hybridSearch').checked,
         topK: parseInt($('topK').value),
-        sessionId: chat.id  // reuse chat id as sessionId
+        sessionId: chat.id
       };
 
       const res = await fetch(endpoint, {
@@ -1357,20 +1571,38 @@
       });
       const data = await res.json();
 
-      if (!isGenerating) return; // stopped
+      if (!isGenerating) return;
 
-      const answer = (res.ok && data.answer) ? data.answer : ('❌ ' + (data.detail || data.message || '请求失败'));
-      const sources = (res.ok && data.sources) ? data.sources : [];
+      const botMsg = { role: 'bot' };
+      let displayAnswer;
 
-      chat.messages[botIdx] = { role: 'bot', content: answer, sources };
+      if (currentMode === 'compare' && res.ok && (data.agent || data.react)) {
+        botMsg.compare = data;
+        displayAnswer = '⚖️ 对比完成（见上方对比视图）';
+      } else {
+        const answer = (res.ok && data.answer) ? data.answer : ('❌ ' + (data.detail || data.message || '请求失败'));
+        displayAnswer = answer;
+        botMsg.content = answer;
+        botMsg.sources = (res.ok && data.sources) ? data.sources : [];
+        if (res.ok && data.steps) botMsg.steps = data.steps;
+        if (res.ok && data.stepCount != null) botMsg.stepCount = data.stepCount;
+        if (res.ok && data.totalMs) botMsg.totalMs = data.totalMs;
+        if (res.ok && data.queryRewritten) botMsg.queryRewritten = data.queryRewritten;
+        if (res.ok && data.mode) botMsg.mode = data.mode;
+      }
+
+      chat.messages[botIdx] = botMsg;
       chat.updatedAt = Date.now();
       saveChats();
       renderChat();
 
-      // Typewriter effect
-      const bubble = chatContentEl.querySelector(`[data-idx="${botIdx}"]`);
-      if (bubble && answer && !answer.startsWith('❌')) {
-        await typewriterEffect(bubble, answer, sources);
+      if (!botMsg.compare) {
+        const bubble = chatContentEl.querySelector(`[data-idx="${botIdx}"]`);
+        if (bubble && displayAnswer && !displayAnswer.startsWith('❌')) {
+          await typewriterEffect(bubble, displayAnswer, botMsg.sources);
+        } else {
+          scrollToBottom();
+        }
       } else {
         scrollToBottom();
       }
@@ -1403,7 +1635,13 @@
     sendBtn.disabled = loading;
     stopBtn.style.display = loading ? 'flex' : 'none';
     $('statusDot').style.background = loading ? '#f59e0b' : '#10b981';
-    $('statusText').textContent = loading ? (currentMode === 'agent' ? 'Agent 推理中...' : '思考中...') : '就绪';
+    const labelMap = {
+      agent: 'Agent 推理中...',
+      react: 'ReAct 推理中（Thought → Action → Observation）...',
+      compare: '双模式对比中（Agent + ReAct 同时推理）...',
+      rag: '知识库检索中...'
+    };
+    $('statusText').textContent = loading ? (labelMap[currentMode] || '思考中...') : '就绪';
     inputEl.readOnly = loading;
     inputEl.style.opacity = loading ? '0.6' : '1';
   }

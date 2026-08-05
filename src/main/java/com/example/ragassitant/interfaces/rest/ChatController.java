@@ -3,6 +3,7 @@ package com.example.ragassitant.interfaces.rest;
 import com.example.ragassitant.application.service.AgentAppService;
 import com.example.ragassitant.application.service.IngestAppService;
 import com.example.ragassitant.application.service.RagAppService;
+import com.example.ragassitant.application.service.ReActAgentAppService;
 import com.example.ragassitant.interfaces.dto.request.ChatRequestDTO;
 import com.example.ragassitant.interfaces.dto.response.ChatResponseDTO;
 import org.springframework.http.ResponseEntity;
@@ -19,13 +20,16 @@ public class ChatController {
     private final RagAppService ragAppService;
     private final IngestAppService ingestAppService;
     private final AgentAppService agentAppService;
+    private final ReActAgentAppService reActAgentAppService;
 
     public ChatController(RagAppService ragAppService,
                           IngestAppService ingestAppService,
-                          AgentAppService agentAppService) {
+                          AgentAppService agentAppService,
+                          ReActAgentAppService reActAgentAppService) {
         this.ragAppService = ragAppService;
         this.ingestAppService = ingestAppService;
         this.agentAppService = agentAppService;
+        this.reActAgentAppService = reActAgentAppService;
     }
 
     @PostMapping("/chat")
@@ -114,12 +118,93 @@ public class ChatController {
         }
     }
 
+    @PostMapping("/react-agent-chat")
+    public ResponseEntity<Map<String, Object>> reactAgentChat(@RequestBody ChatRequestDTO request) {
+        try {
+            String sessionId = request.getSessionId();
+            if (sessionId == null || sessionId.isBlank()) {
+                sessionId = "react-session-" + System.currentTimeMillis();
+            }
+            boolean enableHybrid = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
+            Map<String, Object> result = reActAgentAppService.chat(
+                    request.getQuestion(), sessionId, true, enableHybrid, request.getTopK());
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            Map<String, Object> err = new java.util.HashMap<>();
+            err.put("answer", "❌ ReAct Agent 处理失败: " + e.getMessage());
+            err.put("sources", List.of());
+            err.put("mode", "react");
+            err.put("steps", List.of());
+            err.put("stepCount", 0);
+            return ResponseEntity.internalServerError().body(err);
+        }
+    }
+
+    @PostMapping("/compare-chat")
+    public ResponseEntity<Map<String, Object>> compareChat(@RequestBody ChatRequestDTO request) {
+        long start = System.currentTimeMillis();
+        Map<String, Object> result = new java.util.HashMap<>();
+        String sessionId = request.getSessionId() != null ? request.getSessionId() : "cmp-" + System.currentTimeMillis();
+        boolean enableHybrid = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
+
+        Map<String, Object> agentResult = new java.util.HashMap<>();
+        long agentStart = System.currentTimeMillis();
+        try {
+            AgentAppService.ChatResponse resp = agentAppService.chat(
+                    request.getQuestion(), sessionId + "-A", true, enableHybrid, request.getTopK());
+            List<Map<String, Object>> sources = List.of();
+            if (resp.sources != null) {
+                sources = resp.sources.stream()
+                        .map(s -> Map.<String, Object>of("content", s.content, "metadata", s.metadata, "score", s.score))
+                        .toList();
+            }
+            agentResult.put("answer", resp.answer);
+            agentResult.put("sources", sources);
+            agentResult.put("success", true);
+            agentResult.put("elapsedMs", System.currentTimeMillis() - agentStart);
+        } catch (Exception e) {
+            agentResult.put("answer", "❌ " + e.getMessage());
+            agentResult.put("sources", List.of());
+            agentResult.put("success", false);
+            agentResult.put("elapsedMs", System.currentTimeMillis() - agentStart);
+            agentResult.put("error", e.getMessage());
+        }
+
+        Map<String, Object> reactResult = new java.util.HashMap<>();
+        long reactStart = System.currentTimeMillis();
+        try {
+            Map<String, Object> rr = reActAgentAppService.chat(
+                    request.getQuestion(), sessionId + "-R", true, enableHybrid, request.getTopK());
+            reactResult.put("answer", rr.get("answer"));
+            reactResult.put("sources", rr.get("sources"));
+            reactResult.put("steps", rr.get("steps"));
+            reactResult.put("stepCount", rr.get("stepCount"));
+            reactResult.put("success", true);
+            reactResult.put("elapsedMs", System.currentTimeMillis() - reactStart);
+        } catch (Exception e) {
+            reactResult.put("answer", "❌ " + e.getMessage());
+            reactResult.put("sources", List.of());
+            reactResult.put("steps", List.of());
+            reactResult.put("stepCount", 0);
+            reactResult.put("success", false);
+            reactResult.put("elapsedMs", System.currentTimeMillis() - reactStart);
+            reactResult.put("error", e.getMessage());
+        }
+
+        result.put("question", request.getQuestion());
+        result.put("sessionId", sessionId);
+        result.put("totalMs", System.currentTimeMillis() - start);
+        result.put("agent", agentResult);
+        result.put("react", reactResult);
+        return ResponseEntity.ok(result);
+    }
+
     @GetMapping("/health")
     public Map<String, Object> health() {
         return Map.of(
                 "status", "ok",
                 "model", "spring-ai-2.0.0 + ollama + rag + agent + ddd-4layer + bm25-hybrid",
-                "features", List.of("rag", "hybrid-search", "doc-version", "agent", "influxdb", "ddd-layers")
+                "features", List.of("rag", "hybrid-search", "doc-version", "agent", "react-agent", "compare-mode", "influxdb", "ddd-layers")
         );
     }
 }
