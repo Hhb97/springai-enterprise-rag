@@ -13,6 +13,8 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -70,8 +72,6 @@ public class SpringAiChatAdapter implements LlmPort {
         try {
             return chatClient.prompt().messages(toSpringMessages(messages)).call().content();
         } catch (Exception e) {
-            // 调用方（如 Query 改写）超时后会 cancel(true) 打断本线程，这是预期路径而不是故障，
-            // 打成 ERROR + 完整堆栈只会淹没真正的错误
             if (isInterrupt(e)) {
                 Thread.currentThread().interrupt();
                 log.debug("⏹️ LLM 调用被调用方取消（通常是上游超时）");
@@ -79,6 +79,34 @@ public class SpringAiChatAdapter implements LlmPort {
                 log.error("❌ LLM RawMessages 调用失败", e);
             }
             return null;
+        }
+    }
+
+    @Override
+    public Flux<String> chatStreamWithRawMessages(List<MessageDTO> messages) {
+        try {
+            return chatClient.prompt()
+                    .messages(toSpringMessages(messages))
+                    .stream()
+                    .chatResponse()
+                    .map(chatResponse -> {
+                        if (chatResponse == null || chatResponse.getResult() == null
+                                || chatResponse.getResult().getOutput() == null) return "";
+                        String text = chatResponse.getResult().getOutput().getText();
+                        return text == null ? "" : text;
+                    })
+                    .filter(s -> s != null && !s.isEmpty())
+                    .doOnError(e -> {
+                        if (isInterrupt(e)) {
+                            Thread.currentThread().interrupt();
+                            log.debug("⏹️ LLM Stream 调用被取消");
+                        } else {
+                            log.error("❌ LLM Stream RawMessages 调用失败", e);
+                        }
+                    });
+        } catch (Exception e) {
+            log.error("❌ LLM Stream RawMessages 创建失败", e);
+            return Flux.error(e);
         }
     }
 
@@ -177,4 +205,4 @@ public class SpringAiChatAdapter implements LlmPort {
         }
         return springMessages;
     }
-}
+}

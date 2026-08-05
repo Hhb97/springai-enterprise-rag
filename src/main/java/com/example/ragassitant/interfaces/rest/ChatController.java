@@ -6,8 +6,10 @@ import com.example.ragassitant.application.service.RagAppService;
 import com.example.ragassitant.application.service.ReActAgentAppService;
 import com.example.ragassitant.interfaces.dto.request.ChatRequestDTO;
 import com.example.ragassitant.interfaces.dto.response.ChatResponseDTO;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 import java.util.Map;
@@ -138,6 +140,24 @@ public class ChatController {
             err.put("stepCount", 0);
             return ResponseEntity.internalServerError().body(err);
         }
+    }
+
+    /**
+     * ReAct 流式端点（SSE）。
+     * 返回 text/event-stream，事件序列：
+     *   step_start → thought_delta*N → thought_end
+     *     → (如果调工具) action_start → action_end → 下一轮 step
+     *     → (如果给出答案) final_start → final_delta*N → done
+     * 任何环节出错会额外发 error 事件，然后一定发 done 事件并关闭流。
+     */
+    @PostMapping(value = "/react-agent-chat-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter reactAgentChatStream(@RequestBody ChatRequestDTO request) {
+        String sessionId = (request.getSessionId() == null || request.getSessionId().isBlank())
+                ? "react-stream-" + System.currentTimeMillis()
+                : request.getSessionId();
+        boolean enableHybrid = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
+        return reActAgentAppService.chatStream(
+                request.getQuestion(), sessionId, true, enableHybrid, request.getTopK());
     }
 
     @PostMapping("/compare-chat")

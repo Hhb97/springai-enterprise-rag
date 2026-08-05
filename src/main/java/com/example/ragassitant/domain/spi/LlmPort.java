@@ -1,5 +1,7 @@
 package com.example.ragassitant.domain.spi;
 
+import reactor.core.publisher.Flux;
+
 import java.util.List;
 
 public interface LlmPort {
@@ -7,6 +9,22 @@ public interface LlmPort {
     String chat(List<String> systemPrompts, List<String> historyUser, List<String> historyAssistant, String currentUser);
 
     String chatWithRawMessages(List<MessageDTO> messages);
+
+    /**
+     * 流式版本 chatWithRawMessages。
+     * 返回 Flux<String>，每个元素是 LLM 增量吐出的 token（或 token 片段）。
+     * 结束时 Flux complete，异常时 Flux error。
+     *
+     * <p>典型用法：
+     * <pre>
+     *   StringBuilder buf = new StringBuilder();
+     *   llmPort.chatStreamWithRawMessages(messages)
+     *     .doOnNext(buf::append)
+     *     .doOnComplete(() -> System.out.println(buf))
+     *     .subscribe();
+     * </pre>
+     */
+    Flux<String> chatStreamWithRawMessages(List<MessageDTO> messages);
 
     /**
      * Spring AI 2.0 官方自动 Tool Calling Agent 循环。
