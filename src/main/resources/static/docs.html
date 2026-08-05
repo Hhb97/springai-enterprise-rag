@@ -4,81 +4,618 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>知识库管理 - RAG AI 助手</title>
-
     <style>
+        :root {
+            --accent: #4f46e5;
+            --accent-2: #7c3aed;
+            --accent-3: #8b5cf6;
+            --bg: #f8fafc;
+            --surface: #ffffff;
+            --surface-2: #f1f5f9;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+            --border: #e2e8f0;
+            --border-strong: #cbd5e1;
+            --success: #10b981;
+            --warn: #f59e0b;
+            --danger: #ef4444;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 6px rgba(0,0,0,0.04);
+            --shadow-lg: 0 12px 32px rgba(0,0,0,0.12), 0 4px 12px rgba(0,0,0,0.06);
+            --shadow-glow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; min-height: 100vh; }
-        .header { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); color: #fff; padding: 16px 24px; box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3); }
-        .header .nav { display: flex; align-items: center; gap: 24px; }
-        .header a { color: rgba(255,255,255,0.9); text-decoration: none; font-size: 14px; }
-        .header a.active { color: #fff; font-weight: 600; }
-        .header h1 { font-size: 18px; font-weight: 600; }
-        .container { padding: 24px; max-width: 1200px; margin: 0 auto; }
-        .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); padding: 24px; margin-bottom: 24px; }
-        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #eee; }
-        .card-header h2 { font-size: 16px; font-weight: 600; color: #1a1a1a; }
-        .btn { padding: 8px 16px; border-radius: 6px; font-size: 14px; cursor: pointer; border: none; transition: all 0.2s; }
-        .btn-primary { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); color: #fff; }
-        .btn-primary:hover { opacity: 0.9; }
-        .btn-secondary { background: #f0f0f0; color: #666; }
-        .btn-secondary:hover { background: #e8e8e8; }
-        .btn-success { background: #22c55e; color: #fff; }
-        .btn-success:hover { background: #16a34a; }
-        .btn-warning { background: #f59e0b; color: #fff; }
-        .btn-warning:hover { background: #d97706; }
-        .btn-danger { background: #ef4444; color: #fff; }
-        .btn-danger:hover { background: #dc2626; }
-        .btn-sm { padding: 4px 10px; font-size: 12px; }
-        .table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        .table th, .table td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
-        .table th { background: #f8f9fa; font-weight: 600; color: #666; }
-        .table tr:hover { background: #fafafa; }
-        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; }
-        .badge-draft { background: #fef3c7; color: #d97706; }
-        .badge-active { background: #dcfce7; color: #16a34a; }
-        .badge-archived { background: #f3f4f6; color: #6b7280; }
-        .badge-deleted { background: #fee2e2; color: #dc2626; }
-        .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 1000; }
-        .modal.active { display: flex; }
-        .modal-content { background: #fff; border-radius: 12px; padding: 24px; width: 90%; max-width: 500px; }
-        .modal-content h3 { margin-bottom: 20px; font-size: 16px; }
-        .form-group { margin-bottom: 16px; }
-        .form-group label { display: block; margin-bottom: 6px; font-size: 14px; color: #333; }
-        .form-group input, .form-group select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
-        .form-group input:focus, .form-group select:focus { outline: none; border-color: #6366f1; }
-        .form-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
-        .upload-area { border: 2px dashed #ddd; border-radius: 8px; padding: 32px; text-align: center; cursor: pointer; transition: all 0.2s; }
-        .upload-area:hover { border-color: #6366f1; background: #faf5ff; }
+        
+        html { scroll-behavior: smooth; }
+
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro SC", "Segoe UI", "PingFang SC",
+                "Hiragino Sans GB", "Microsoft YaHei UI", Roboto, sans-serif; 
+            background: var(--bg); 
+            min-height: 100vh; 
+            color: var(--text-primary);
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            background-image: 
+                radial-gradient(circle at 15% 0%, rgba(99, 102, 241, 0.06) 0, transparent 40%),
+                radial-gradient(circle at 85% 10%, rgba(139, 92, 246, 0.05) 0, transparent 35%),
+                radial-gradient(rgba(148, 163, 184, 0.15) 1px, transparent 1px);
+            background-size: 100% 100%, 100% 100%, 20px 20px;
+        }
+
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { 
+            background: var(--border-strong); 
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+        .header {
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #8b5cf6 100%);
+            color: #fff;
+            padding: 18px 28px;
+            box-shadow: 0 4px 16px rgba(99, 102, 241, 0.25);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: 
+                radial-gradient(circle at 20% 50%, rgba(255,255,255,0.12) 0, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(255,255,255,0.08) 0, transparent 40%);
+            pointer-events: none;
+        }
+
+        .header .nav { 
+            display: flex; 
+            align-items: center; 
+            gap: 28px; 
+            position: relative;
+            z-index: 1;
+        }
+
+        .header h1 { 
+            font-size: 20px; 
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            letter-spacing: -0.01em;
+        }
+
+        .header a { 
+            color: rgba(255,255,255,0.85); 
+            text-decoration: none; 
+            font-size: 14px;
+            font-weight: 500;
+            padding: 6px 12px;
+            border-radius: 8px;
+            transition: all 0.2s;
+        }
+
+        .header a:hover { 
+            color: #fff;
+            background: rgba(255,255,255,0.15);
+            transform: translateY(-1px);
+        }
+
+        .header a.active { 
+            color: #fff; 
+            font-weight: 600;
+            background: rgba(255,255,255,0.2);
+            backdrop-filter: blur(8px);
+        }
+
+        .container { 
+            padding: 28px; 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            animation: fadeInUp 0.5s ease-out;
+        }
+
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes slideInLeft {
+            from { opacity: 0; transform: translateX(-16px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        @keyframes slideInUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes scaleIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        .card { 
+            background: var(--surface); 
+            border-radius: var(--radius-lg); 
+            box-shadow: var(--shadow-md); 
+            padding: 28px; 
+            margin-bottom: 28px;
+            border: 1px solid var(--border);
+            animation: fadeInUp 0.5s ease-out 0.1s backwards;
+        }
+
+        .card-header { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 24px; 
+            padding-bottom: 18px; 
+            border-bottom: 1px solid var(--border);
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .card-header h2 { 
+            font-size: 17px; 
+            font-weight: 700; 
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn { 
+            padding: 10px 18px; 
+            border-radius: var(--radius-sm); 
+            font-size: 14px; 
+            cursor: pointer; 
+            border: none; 
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .btn::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, rgba(255,255,255,0.2), transparent);
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .btn:hover::before { opacity: 1; }
+
+        .btn-primary { 
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); 
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+        }
+
+        .btn-primary:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+        }
+
+        .btn-secondary { 
+            background: var(--surface-2); 
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover { 
+            background: var(--border);
+            color: var(--text-primary);
+            transform: translateY(-1px);
+        }
+
+        .btn-success { 
+            background: linear-gradient(135deg, #10b981, #059669); 
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(16, 185, 129, 0.25);
+        }
+
+        .btn-success:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35);
+        }
+
+        .btn-warning { 
+            background: linear-gradient(135deg, #f59e0b, #d97706); 
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
+        }
+
+        .btn-warning:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(245, 158, 11, 0.35);
+        }
+
+        .btn-danger { 
+            background: linear-gradient(135deg, #ef4444, #dc2626); 
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(239, 68, 68, 0.25);
+        }
+
+        .btn-danger:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35);
+        }
+
+        .btn-sm { 
+            padding: 6px 12px; 
+            font-size: 12.5px; 
+        }
+
+        .table { 
+            width: 100%; 
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 14px; 
+        }
+
+        .table th, .table td { 
+            padding: 14px 16px; 
+            text-align: left; 
+            border-bottom: 1px solid var(--border); 
+        }
+
+        .table th { 
+            background: linear-gradient(180deg, var(--surface-2), transparent);
+            font-weight: 700; 
+            color: var(--text-secondary);
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .table tbody tr {
+            transition: all 0.15s;
+            animation: slideInLeft 0.3s ease-out backwards;
+        }
+
+        .table tbody tr:nth-child(1) { animation-delay: 0.02s; }
+        .table tbody tr:nth-child(2) { animation-delay: 0.04s; }
+        .table tbody tr:nth-child(3) { animation-delay: 0.06s; }
+        .table tbody tr:nth-child(4) { animation-delay: 0.08s; }
+        .table tbody tr:nth-child(5) { animation-delay: 0.1s; }
+
+        .table tbody tr:hover { 
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.04), rgba(139, 92, 246, 0.02));
+        }
+
+        .table tbody tr:hover td {
+            border-bottom-color: rgba(99, 102, 241, 0.2);
+        }
+
+        .badge { 
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px; 
+            border-radius: 999px; 
+            font-size: 12px; 
+            font-weight: 600;
+        }
+
+        .badge-draft { 
+            background: linear-gradient(135deg, #fef3c7, #fde68a); 
+            color: #92400e; 
+        }
+
+        .badge-active { 
+            background: linear-gradient(135deg, #dcfce7, #bbf7d0); 
+            color: #166534; 
+        }
+
+        .badge-archived { 
+            background: linear-gradient(135deg, #f3f4f6, #e5e7eb); 
+            color: #4b5563; 
+        }
+
+        .badge-deleted { 
+            background: linear-gradient(135deg, #fee2e2, #fecaca); 
+            color: #991b1b; 
+        }
+
+        .modal { 
+            display: none; 
+            position: fixed; 
+            inset: 0; 
+            background: rgba(15, 23, 42, 0.5); 
+            align-items: center; 
+            justify-content: center; 
+            z-index: 1000;
+            backdrop-filter: blur(4px);
+            animation: fadeIn 0.2s ease-out;
+        }
+
+        .modal.active { 
+            display: flex; 
+        }
+
+        .modal-content { 
+            background: var(--surface); 
+            border-radius: var(--radius-lg); 
+            padding: 28px; 
+            width: 90%; 
+            max-width: 520px;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border);
+            animation: scaleIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        .modal-content h3 { 
+            margin-bottom: 24px; 
+            font-size: 17px;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .form-group { 
+            margin-bottom: 18px; 
+        }
+
+        .form-group label { 
+            display: block; 
+            margin-bottom: 8px; 
+            font-size: 14px; 
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .form-group input, .form-group select { 
+            width: 100%; 
+            padding: 11px 14px; 
+            border: 1.5px solid var(--border); 
+            border-radius: var(--radius-sm); 
+            font-size: 14px;
+            transition: all 0.2s;
+            background: var(--surface);
+            color: var(--text-primary);
+        }
+
+        .form-group input:focus, .form-group select:focus { 
+            outline: none; 
+            border-color: var(--accent);
+            box-shadow: var(--shadow-glow);
+        }
+
+        .form-actions { 
+            display: flex; 
+            justify-content: flex-end; 
+            gap: 12px; 
+            margin-top: 28px; 
+        }
+
+        .upload-area { 
+            border: 2px dashed var(--border-strong); 
+            border-radius: var(--radius-md); 
+            padding: 36px 24px; 
+            text-align: center; 
+            cursor: pointer; 
+            transition: all 0.2s;
+            background: var(--surface-2);
+        }
+
+        .upload-area:hover { 
+            border-color: var(--accent); 
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.04), rgba(139, 92, 246, 0.02));
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-sm);
+        }
+
         .upload-area input[type="file"] { display: none; }
-        .upload-area i { font-size: 32px; color: #999; margin-bottom: 8px; }
-        .empty-state { text-align: center; padding: 48px; color: #999; }
-        .empty-state i { font-size: 48px; margin-bottom: 16px; }
-        .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 24px; border-radius: 8px; color: #fff; font-size: 14px; z-index: 2000; animation: slideIn 0.3s; }
-        .toast-success { background: #22c55e; }
-        .toast-error { background: #ef4444; }
-        @keyframes slideIn { from { transform: translateX(100px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-        .search-box { padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; width: 200px; }
-        .search-box:focus { outline: none; border-color: #6366f1; }
-        .version-list { margin-top: 16px; border-left: 2px solid #eee; padding-left: 16px; }
-        .version-item { padding: 12px; background: #f8f9fa; border-radius: 6px; margin-bottom: 8px; position: relative; }
-        .version-item::before { content: ''; position: absolute; left: -9px; top: 16px; width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid #6366f1; }
-        .version-item.active::before { background: #6366f1; }
-        .version-item .version-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
-        .version-item .version-num { font-weight: 600; color: #6366f1; }
-        .version-item .version-date { font-size: 12px; color: #999; }
-        .pagination { display: flex; justify-content: center; gap: 8px; margin-top: 20px; }
-        .pagination button { padding: 6px 12px; border: 1px solid #ddd; background: #fff; border-radius: 4px; cursor: pointer; }
-        .pagination button.active { background: #6366f1; color: #fff; border-color: #6366f1; }
+
+        .upload-area .upload-icon { 
+            font-size: 36px; 
+            color: var(--text-muted); 
+            margin-bottom: 12px;
+            transition: all 0.2s;
+        }
+
+        .upload-area:hover .upload-icon {
+            color: var(--accent);
+            transform: scale(1.1);
+        }
+
+        .empty-state { 
+            text-align: center; 
+            padding: 56px 24px; 
+            color: var(--text-muted);
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        .empty-state .icon { 
+            font-size: 52px; 
+            margin-bottom: 16px;
+            opacity: 0.6;
+        }
+
+        .empty-state p { 
+            font-size: 14.5px;
+            line-height: 1.6;
+        }
+
+        .toast { 
+            position: fixed; 
+            bottom: 28px; 
+            right: 28px; 
+            padding: 14px 24px; 
+            border-radius: var(--radius-md); 
+            color: #fff; 
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 2000; 
+            animation: slideInRight 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            box-shadow: var(--shadow-lg);
+        }
+
+        @keyframes slideInRight {
+            from { transform: translateX(100px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        .toast-success { 
+            background: linear-gradient(135deg, #10b981, #059669); 
+        }
+
+        .toast-error { 
+            background: linear-gradient(135deg, #ef4444, #dc2626); 
+        }
+
+        .search-box { 
+            padding: 10px 14px; 
+            border: 1.5px solid var(--border); 
+            border-radius: var(--radius-sm); 
+            font-size: 14px; 
+            width: 220px;
+            transition: all 0.2s;
+            background: var(--surface);
+            color: var(--text-primary);
+        }
+
+        .search-box:focus { 
+            outline: none; 
+            border-color: var(--accent);
+            box-shadow: var(--shadow-glow);
+        }
+
+        .version-list { 
+            margin-top: 18px; 
+            border-left: 2px solid var(--border); 
+            padding-left: 18px; 
+        }
+
+        .version-item { 
+            padding: 14px; 
+            background: var(--surface-2); 
+            border-radius: var(--radius-sm); 
+            margin-bottom: 10px; 
+            position: relative;
+            transition: all 0.15s;
+            border: 1px solid transparent;
+        }
+
+        .version-item:hover {
+            border-color: var(--border);
+            transform: translateX(2px);
+        }
+
+        .version-item::before { 
+            content: ''; 
+            position: absolute; 
+            left: -25px; 
+            top: 18px; 
+            width: 12px; 
+            height: 12px; 
+            border-radius: 50%; 
+            background: var(--surface); 
+            border: 2.5px solid var(--border-strong);
+            transition: all 0.2s;
+        }
+
+        .version-item.active::before { 
+            background: var(--accent);
+            border-color: var(--accent);
+            box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15);
+        }
+
+        .version-item .version-header { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 6px; 
+        }
+
+        .version-item .version-num { 
+            font-weight: 700; 
+            color: var(--accent);
+            font-size: 14px;
+        }
+
+        .version-item .version-date { 
+            font-size: 12px; 
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .pagination { 
+            display: flex; 
+            justify-content: center; 
+            gap: 8px; 
+            margin-top: 24px; 
+        }
+
+        .pagination button { 
+            padding: 8px 14px; 
+            border: 1px solid var(--border); 
+            background: var(--surface); 
+            border-radius: var(--radius-sm); 
+            cursor: pointer;
+            transition: all 0.15s;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .pagination button:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+            transform: translateY(-1px);
+        }
+
+        .pagination button.active { 
+            background: var(--accent); 
+            color: #fff; 
+            border-color: var(--accent);
+            box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+        }
+
+        .action-btns {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 768px) {
+            .container { padding: 16px; }
+            .card { padding: 18px; }
+            .card-header { flex-direction: column; align-items: stretch; }
+            .search-box { width: 100%; }
+            .table { font-size: 13px; }
+            .table th, .table td { padding: 10px 12px; }
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <div class="nav">
-            <h1>📚 知识库管理</h1>
-            <div style="margin-left: auto; display: flex; gap: 24px;">
-                <a href="/">💬 聊天</a>
-                <a href="/docs.html" class="active">📁 知识库</a>
-                <a href="/agent-trace.html">🔍 Agent 追踪</a>
+            <h1>知识库管理</h1>
+            <div style="margin-left: auto; display: flex; gap: 8px;">
+                <a href="/">聊天</a>
+                <a href="/docs.html" class="active">知识库</a>
+                <a href="/agent-trace.html">Agent 追踪</a>
             </div>
         </div>
     </div>
@@ -86,19 +623,19 @@
     <div class="container">
         <div class="card">
             <div class="card-header">
-                <div style="display: flex; align-items: center; gap: 16px;">
-                    <h2>📁 文档列表</h2>
+                <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+                    <h2>文档列表</h2>
                     <input type="text" id="searchInput" class="search-box" placeholder="搜索文档..." onkeyup="searchDocs()">
                 </div>
-                <div style="display: flex; gap: 8px;">
-                    <button class="btn btn-primary" onclick="showUploadModal()">📤 上传文档</button>
-                    <button class="btn btn-secondary" onclick="ingestAll()">🔄 重建知识库</button>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="btn btn-primary" onclick="showUploadModal()">上传文档</button>
+                    <button class="btn btn-secondary" onclick="ingestAll()">重建知识库</button>
                 </div>
             </div>
             
             <div id="docList">
                 <div class="empty-state">
-                    <div>📭</div>
+                    <div class="icon">📭</div>
                     <p>暂无文档，点击上方按钮上传</p>
                 </div>
             </div>
@@ -107,14 +644,14 @@
 
     <div class="modal" id="uploadModal">
         <div class="modal-content">
-            <h3>📤 上传文档</h3>
+            <h3>上传文档</h3>
             <div class="upload-area" onclick="document.getElementById('fileInput').click()">
-                <div>📁</div>
-                <p>点击或拖拽文件到此处</p>
-                <p style="font-size: 12px; color: #999;">支持: .md, .pdf, .doc, .docx, .xls, .xlsx, .txt</p>
+                <div class="upload-icon">📁</div>
+                <p style="font-weight: 500; margin-bottom: 4px;">点击或拖拽文件到此处</p>
+                <p style="font-size: 13px; color: var(--text-muted);">支持: .md, .pdf, .doc, .docx, .xls, .xlsx, .txt</p>
                 <input type="file" id="fileInput" accept=".md,.pdf,.doc,.docx,.xls,.xlsx,.txt" onchange="handleFileSelect()">
             </div>
-            <div class="form-group">
+            <div class="form-group" style="margin-top: 18px;">
                 <label>上传者</label>
                 <input type="text" id="createdBy" placeholder="输入上传者名称" value="admin">
             </div>
@@ -127,8 +664,8 @@
 
     <div class="modal" id="versionModal">
         <div class="modal-content">
-            <h3>📋 版本历史</h3>
-            <div id="versionContent" style="max-height: 400px; overflow-y: auto;">
+            <h3>版本历史</h3>
+            <div id="versionContent" style="max-height: 420px; overflow-y: auto;">
                 <div class="empty-state">
                     <p>暂无版本记录</p>
                 </div>
@@ -141,14 +678,14 @@
 
     <div class="modal" id="updateModal">
         <div class="modal-content">
-            <h3>🔄 更新文档</h3>
+            <h3>更新文档</h3>
             <input type="hidden" id="updateDocumentId">
             <div class="upload-area" onclick="document.getElementById('updateFileInput').click()">
-                <div>📁</div>
-                <p>点击或拖拽新文件到此处</p>
+                <div class="upload-icon">📁</div>
+                <p style="font-weight: 500; margin-bottom: 4px;">点击或拖拽新文件到此处</p>
                 <input type="file" id="updateFileInput" accept=".md,.pdf,.doc,.docx,.xls,.xlsx,.txt" onchange="handleUpdateFileSelect()">
             </div>
-            <div class="form-group">
+            <div class="form-group" style="margin-top: 18px;">
                 <label>更新者</label>
                 <input type="text" id="updatedBy" placeholder="输入更新者名称" value="admin">
             </div>
@@ -177,7 +714,7 @@
             if (docs.length === 0) {
                 docList.innerHTML = `
                     <div class="empty-state">
-                        <div>📭</div>
+                        <div class="icon">📭</div>
                         <p>暂无文档，点击上方按钮上传</p>
                     </div>
                 `;
@@ -202,19 +739,21 @@
                 html += `
                     <tr>
                         <td style="max-width: 250px;">
-                            <div style="font-weight: 500;">${doc.fileName}</div>
-                            <div style="font-size: 12px; color: #999;">${doc.documentId}</div>
+                            <div style="font-weight: 600;">${doc.fileName}</div>
+                            <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">${doc.documentId}</div>
                         </td>
-                        <td>v${doc.version}</td>
+                        <td><span style="font-weight: 600; color: var(--accent);">v${doc.version}</span></td>
                         <td><span class="badge badge-${doc.status.toLowerCase()}">${getStatusText(doc.status)}</span></td>
-                        <td>${formatDate(doc.createdAt)}</td>
+                        <td style="color: var(--text-secondary); font-size: 13px;">${formatDate(doc.createdAt)}</td>
                         <td>
-                            <button class="btn btn-secondary btn-sm" onclick="showVersions('${doc.documentId}')">版本</button>
-                            <button class="btn btn-success btn-sm" onclick="showUpdateModal('${doc.documentId}')">更新</button>
-                            ${doc.status === 'DRAFT' ? `<button class="btn btn-warning btn-sm" onclick="publishDocument(${doc.id})">发布</button>` : ''}
-                            ${doc.status === 'ACTIVE' ? `<button class="btn btn-secondary btn-sm" onclick="archiveDocument(${doc.id})">归档</button>` : ''}
-                            ${doc.status !== 'ACTIVE' ? `<button class="btn btn-danger btn-sm" onclick="deleteVersion(${doc.id})">删版本</button>` : ''}
-                            <button class="btn btn-danger btn-sm" onclick="deleteDocument('${doc.documentId}')">删文档</button>
+                            <div class="action-btns">
+                                <button class="btn btn-secondary btn-sm" onclick="showVersions('${doc.documentId}')">版本</button>
+                                <button class="btn btn-success btn-sm" onclick="showUpdateModal('${doc.documentId}')">更新</button>
+                                ${doc.status === 'DRAFT' ? `<button class="btn btn-warning btn-sm" onclick="publishDocument(${doc.id})">发布</button>` : ''}
+                                ${doc.status === 'ACTIVE' ? `<button class="btn btn-secondary btn-sm" onclick="archiveDocument(${doc.id})">归档</button>` : ''}
+                                ${doc.status !== 'ACTIVE' ? `<button class="btn btn-danger btn-sm" onclick="deleteVersion(${doc.id})">删版本</button>` : ''}
+                                <button class="btn btn-danger btn-sm" onclick="deleteDocument('${doc.documentId}')">删文档</button>
+                            </div>
                         </td>
                     </tr>
                 `;
@@ -255,7 +794,7 @@
         function handleFileSelect() {
             const file = document.getElementById('fileInput').files[0];
             if (file) {
-                document.querySelector('.upload-area p:first-of-type').textContent = `已选择: ${file.name}`;
+                document.querySelector('#uploadModal .upload-area p:first-of-type').textContent = `已选择: ${file.name}`;
             }
         }
 
@@ -316,10 +855,10 @@
                             <span class="badge badge-${v.status.toLowerCase()}">${getStatusText(v.status)}</span>
                         </div>
                         <div class="version-date">${formatDate(v.createdAt)}</div>
-                        <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                        <div style="font-size: 13px; color: var(--text-secondary); margin-top: 6px;">
                             ${v.fileName} | ${v.chunkCount || 0} 个向量块
                         </div>
-                        <div style="margin-top: 8px; display: flex; gap: 8px;">
+                        <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
                             ${v.status === 'DRAFT' ? `<button class="btn btn-success btn-sm" onclick="publishDocument(${v.id})">发布</button>` : ''}
                             ${v.status === 'ACTIVE' ? `<button class="btn btn-secondary btn-sm" onclick="addToKB(${v.id})">加入知识库</button>` : ''}
                             ${v.status !== 'DELETED' ? `<button class="btn btn-danger btn-sm" onclick="deleteVersion(${v.id})">删除</button>` : ''}
@@ -417,8 +956,29 @@
             }
         }
 
+        async function deleteVersion(versionId) {
+            if (!confirm('确定要删除这个版本吗？')) return;
+
+            try {
+                const res = await fetch(`/api/docs/versions/${versionId}`, {
+                    method: 'DELETE'
+                });
+
+                if (res.ok) {
+                    showToast('删除成功', 'success');
+                    loadDocuments();
+                    closeModal('versionModal');
+                } else {
+                    const data = await res.json();
+                    showToast('删除失败: ' + (data.message || '未知错误'), 'error');
+                }
+            } catch (err) {
+                showToast('删除失败: ' + err.message, 'error');
+            }
+        }
+
         async function deleteDocument(documentId) {
-            if (!confirm('确定要删除这个文档吗？将删除所有版本。')) return;
+            if (!confirm('确定要删除整个文档及其所有版本吗？此操作不可恢复！')) return;
 
             try {
                 const res = await fetch(`/api/docs/${documentId}`, {
@@ -437,38 +997,17 @@
             }
         }
 
-        async function deleteVersion(versionId) {
-            if (!confirm('确定要删除这个版本吗？')) return;
-
-            try {
-                const res = await fetch(`/api/docs/versions/${versionId}`, {
-                    method: 'DELETE'
-                });
-
-                if (res.ok) {
-                    showToast('版本删除成功', 'success');
-                    loadDocuments();
-                    closeModal('versionModal');
-                } else {
-                    const data = await res.json();
-                    showToast('删除失败: ' + (data.message || '未知错误'), 'error');
-                }
-            } catch (err) {
-                showToast('删除失败: ' + err.message, 'error');
-            }
-        }
-
         async function ingestAll() {
-            if (!confirm('确定要重建知识库吗？这将清空现有向量库并重新加载所有活跃文档。')) return;
+            if (!confirm('确定要重建知识库吗？这将重新处理所有活跃文档。')) return;
 
             try {
-                const res = await fetch('/ai/ingest', {
+                const res = await fetch('/api/docs/ingest-all', {
                     method: 'POST'
                 });
 
                 if (res.ok) {
-                    const data = await res.json();
-                    showToast(`知识库重建成功，共 ${data.count} 条向量`, 'success');
+                    showToast('重建任务已启动', 'success');
+                    loadDocuments();
                 } else {
                     const data = await res.json();
                     showToast('重建失败: ' + (data.message || '未知错误'), 'error');
@@ -479,34 +1018,36 @@
         }
 
         async function addToKB(versionId) {
-            if (!confirm('确定要将这个版本加入知识库吗？将替换该文档的旧向量数据。')) return;
-
             try {
-                const res = await fetch(`/ai/ingest/${versionId}`, {
+                const res = await fetch(`/api/docs/versions/${versionId}/add-to-kb`, {
                     method: 'POST'
                 });
 
                 if (res.ok) {
-                    const data = await res.json();
-                    showToast(`成功入库 ${data.count} 条向量`, 'success');
+                    showToast('已加入知识库', 'success');
                 } else {
                     const data = await res.json();
-                    showToast('入库失败: ' + (data.message || '未知错误'), 'error');
+                    showToast('操作失败: ' + (data.message || '未知错误'), 'error');
                 }
             } catch (err) {
-                showToast('入库失败: ' + err.message, 'error');
+                showToast('操作失败: ' + err.message, 'error');
             }
         }
 
-        function showToast(message, type = 'success') {
+        function showToast(msg, type = 'success') {
             const toast = document.createElement('div');
             toast.className = `toast toast-${type}`;
-            toast.textContent = message;
+            toast.textContent = msg;
             document.body.appendChild(toast);
-            setTimeout(() => toast.remove(), 3000);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(100px)';
+                toast.style.transition = 'all 0.3s';
+                setTimeout(() => toast.remove(), 300);
+            }, 2500);
         }
 
-        document.addEventListener('DOMContentLoaded', loadDocuments);
+        loadDocuments();
     </script>
 </body>
 </html>
