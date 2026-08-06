@@ -1,0 +1,12 @@
+﻿# ============================================================
+# 登录认证（Basic Auth + Session）
+# ============================================================
+
+auth:
+  # 是否启用登录认证（true=启用，false=关闭）
+  enabled: ${AUTH_ENABLED:true}
+  # 登录用户名
+  username: ${AUTH_USERNAME:admin}
+  # 登录密码
+  password: ${AUTH_PASSWORD:admin123}
+

@@ -12,6 +12,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.filter.Filter;
+import reactor.core.publisher.Flux;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -116,6 +117,11 @@ class RagRelevanceGateTest {
         public String chatWithRawMessages(List<MessageDTO> messages) {
             calls++;
             return "模型回答";
+        }
+
+        @Override
+        public Flux<String> chatStreamWithRawMessages(List<MessageDTO> messages) {
+            return null;
         }
 
         @Override

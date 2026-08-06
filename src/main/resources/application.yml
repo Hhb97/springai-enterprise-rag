@@ -1,229 +1,31 @@
-﻿server:
-  port: 8900
-
-# === 日志格式：TraceId 来自 TraceIdFilter（MDC traceId），排查链路不用靠时间戳对日志 ===
-#  - [%X{traceId}]：MDC 里的 traceId，空值时输出 [] 不影响格式对齐
-#  - 其他字段顺序按生产常见：时间 → 线程 → traceId → 级别 → logger(36字符截断) → 消息
-logging:
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [traceId=%X{traceId:-}] %-5level %logger{36} - %msg%n"
-  level:
-    # Spring AI 内部 Tool Calling 循环日志很有用，INFO 级别可以看到每轮 LLM 决策
-    root: INFO
+﻿# ============================================================
+# 主配置入口：通过 spring.profiles.include 聚合各职责配置文件
+#
+# 子文件一览（按加载顺序排列，同名属性后者覆盖前者）：
+#   application-server.yml   服务端口、日志格式、运维监控 Actuator
+#   application-db.yml       数据源、H2 控制台、JPA / Hibernate
+#   application-ai.yml       Spring AI：Ollama / DashScope / Embedding
+#   application-rag.yml      RAG：切分、相似度阈值、Query 改写
+#   application-agent.yml    Agent：Tool Calling、会话、启发式+影子路由
+#   application-storage.yml  文件上传目录、InfluxDB 1.x
+#   application-prompt.yml   Prompt 提示词（可热改）
+#   application-auth.yml     登录认证：开关 + 用户名密码
+#
+# 注：spring.profiles.active 多环境（dev/test/prod）可与 include 叠加，
+#     如 spring.profiles.active=prod 会额外加载 application-prod.yml
+# ============================================================
 
 spring:
   application:
     name: rag-assistant
 
-  datasource:
-    url: jdbc:h2:file:./data/ragdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
-    username: sa
-    password:
-    driver-class-name: org.h2.Driver
-
-  h2:
-    console:
-      enabled: true
-      path: /h2-console
-
-  jpa:
-    hibernate:
-      ddl-auto: update
-    show-sql: true
-    properties:
-      hibernate:
-        format_sql: true
-        # Spring Boot 4.x + Hibernate 7.2 不再自动猜测方言，必须显式指定 H2
-        dialect: org.hibernate.dialect.H2Dialect
-        # 关闭 Hibernate 7 对 enum/ddl-auto 的严格检查（避免老 DB 表元数据缺失时报错）
-        schema_management:
-          tool:
-            uniqueConstraintStrategy: skip
-
-  ai:
-    # ===== LLM 后端选择：ollama（本地）/ dashscope（阿里云百炼）=====
-    # chat-backend: 控制 ChatClient 和 Agent Tool Calling 用哪个模型
-    # embedding-backend: 控制向量编码用哪个模型（建议本地 Ollama 保持 nomic-embed-text，成本低）
-    chat-backend: ${CHAT_BACKEND:ollama}
-    embedding-backend: ${EMBED_BACKEND:ollama}
-
-    ollama:
-      base-url: ${OLLAMA_BASE_URL:http://192.168.221.130:11434}
-      # Spring AI 2.0 GA 聊天模型（AutoConfiguration 正确识别的前缀）
-      default-chat-options:
-        model: ${OLLAMA_CHAT_MODEL:qwen2.5:1.5b}
-        temperature: 0.3
-        num-predict: 1024
-      chat:
-        options:
-          model: ${OLLAMA_CHAT_MODEL:qwen2.5:1.5b}
-          temperature: 0.3
-          num-predict: 1024
-      # Spring AI 2.0 GA embedding 模型（两种写法都留，覆盖不同 BOM 版本的属性绑定）
-      # 错误：mxbai-embed-large 是默认值，很多 Ollama 没 pull，必须显式指定 nomic-embed-text
-      embedding:
-        options:
-          model: ${OLLAMA_EMBED_MODEL:bge-m3}
-      default-embedding-options:
-        model: ${OLLAMA_EMBED_MODEL:bge-m3}
-
-    # ===== 阿里云百炼 DashScope（OpenAI 兼容协议）=====
-    # 控制台：https://bailian.console.aliyun.com/
-    # 创建 API Key 后填入，或通过环境变量 DASHSCOPE_API_KEY 注入
-    openai:
-      api-key: ${DASHSCOPE_API_KEY:sk-ws-H.EIYELHP.wgbf.MEYCIQD62sIFEbgcWTRFQbSph3BC5qKqNiu_TNbuTAWSMqSmhlDRQ}
-      base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
-      # DashScope 聊天模型（任选其一）：
-      #   qwen-plus          通义千问 Plus（性价比高，推荐）
-      #   qwen-max           通义千问 Max（效果最好）
-      #   qwen-turbo         通义千问 Turbo（响应最快）
-      #   qwen-vl-plus       多模态
-      default-chat-options:
-        model: ${DASHSCOPE_CHAT_MODEL:qwen3.7-plus}
-        temperature: 0.3
-      chat:
-        options:
-          model: ${DASHSCOPE_CHAT_MODEL:qwen3.7-plus}
-          temperature: 0.3
-      # ===== 可选：DashScope Embedding 向量编码（二选一，默认还是用 Ollama nomic-embed-text）=====
-      # embedding:
-      #   options:
-      #     model: text-embedding-v3
-
-# RAG 配置
-rag:
-  top-k: 3
-  hybrid-search:
-    keyword-weight: 0.3
-    vector-weight: 0.7
-
-  # === 文档切分（改这里后必须跑一次 POST /ai/ingest 全量重建向量库）===
-  chunking:
-    # 按「字符数」而非 token 计量：cl100k_base 与 nomic-embed-text 分词对不上，中文误差大
-    chunk-size-chars: 600
-    # 约 15% 重叠，避免跨块语义被切断；实际会被收紧到不超过 chunk-size 的一半
-    overlap-chars: 90
-    # 小于此长度的碎片丢弃（整篇仅一块时不受此限制，避免短文档被整篇丢掉）
-    min-chunk-chars: 50
-    # 入库文本前置「【章节: A > B > C】」。只注入章节路径、不注入文件名——
-    # 文件名对语义无贡献却会让同一文档的所有 chunk 向量高度趋同。关掉可做 A/B 对比。
-    inject-heading-prefix: true
-    # Markdown 小节合并屏障：不跨该层级及以上的标题合并（1=不跨 h1，2=不跨 h2，0=不限制）。
-    # Markdown 按标题逐节解析，不合并的话几十字的小节会各自成块，chunk-size 预算用不上。
-    merge-barrier-level: 1
-
-  # === 🔴 幻觉防护：相似度阈值 + 纯知识库模式 🔴 ===
-  # 【这三个开关曾经只写在这里、没有任何代码读取，等于完全没有防护】现已接入：
-  #   similarity-threshold → RagAppService#buildRetriever / applyThreshold
-  #   min-keep-chunks      → RagAppService#applyThreshold
-  #   pure-knowledge-mode  → AgentAppService 构造函数
-  #
-  # 低于此分数的检索文档直接丢弃，避免「不相关片段 + LLM 脑补」产生幻觉。
-  # 余弦相似度经验值：0.5 以下基本不相关，0.3 以下完全无关；保守点可以 0.45
-  # 注意：只用于卡「向量余弦相似度」，不卡混合检索的融合分（两者量纲不同）。
-  similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.40}
-  # 最少保留几块：即使都低于阈值，也留 topN 给 LLM 做参考（避免完全空上下文后模型放飞自我）。
-  # 保底块会被标记 belowThreshold：纯 RAG 链路降级成「不许强行总结」的低置信度提示词，
-  # Agent 链路直接丢弃（那边还有工具和常识能力，宁可空上下文也不要无关文档）。
-  # 设为 0 = 不保底，低于阈值一律丢弃。
-  min-keep-chunks: ${RAG_MIN_KEEP:1}
-  # 纯知识库模式开关：true = 禁用设备/能耗工具的启发式强制路由（FORCE_EXEC）和 Tool Calling，
-  #   所有问题只走 RAG 检索，检索不到就说「知识库暂无相关信息」。适合纯电能质量文档问答场景。
-  # false = 保留 设备清单+能耗查询 的 Agent 能力（当前默认）。
-  # 【默认为何是 false】打开会让「列出所有设备」这类查询整体失效，属于产品形态变更，必须显式选择。
-  pure-knowledge-mode: ${RAG_PURE_MODE:false}
-
-  # === Query 改写：把多轮里的省略/指代问句还原成可独立检索的完整问句 ===
-  # 产物只用于检索，送给 LLM 的对话消息始终是用户原话。
-  query-rewrite:
-    enabled: true
-    # 独立于 spring.ai.chat-backend：指代消解对 1.5b 小模型偏吃力，改写跑偏反而让检索更差；
-    # 而它在问答主链路上，本地小模型还要额外付 1~3s 推理延迟。取值 dashscope / openai / ollama。
-    # 目标后端不可用时自动降级到主聊天模型，不会导致启动失败。
-    backend: ${REWRITE_BACKEND:dashscope}
-    # 改写模型必须和 backend 匹配。留空 = 沿用后端默认模型。
-    # 【必须显式指定的原因】主对话默认的 qwen3.7-flash 是推理模型：改写「那结算周期呢」这种
-    # 机械任务也会先思考一轮（实测 reasoning_tokens=145），必然撞上 3s 超时，
-    # 而且思维链会混进输出污染改写结果。改写要的是快且不发挥，非推理模型才对。
-    # 实测同一 prompt：qwen-turbo 0.47s / qwen-flash 0.69s / qwen-plus 1.10s，均无思考 token。
-    model: ${REWRITE_MODEL:qwen-turbo}
-    # 超时后静默回退原问题，绝不阻断主流程
-    timeout-ms: 3000
-    # 只喂最近 N 轮，喂太多历史会把改写带偏到旧话题
-    max-history-pairs: 3
-    # 改写结果超过原问题这个倍数 → 判定模型在扩写或直接作答了，回退原问题
-    max-length-ratio: 3.0
-
-# === Agent 链路配置 → AgentProperties（强类型绑定，启动日志会打印生效值）===
-# 【改造前的状态】这里原本是 default-max-iterations / default-memory-size 两个「预留」键，
-# 没有任何代码读取；真正生效的是 AgentAppService 里硬编码的 static final 常量。
-# 而 prompt.agent.max-history 与 default-memory-size 语义完全重复，也同样没人读 —— 已合并为 memory-size。
-agent:
-  # LLM 自动 Tool Calling 的最大轮次，超过即强制出最终回答
-  max-tool-calls: ${AGENT_MAX_TOOL_CALLS:5}
-  # 每个会话最多带入多少轮历史对话（同时也是单会话在内存里保留的轮次上限）
-  memory-size: ${AGENT_MEMORY_SIZE:20}
-
-  # 会话清理：原先 clearExpired() 没有任何调用方，会话只增不减。
-  # 现在由 @Scheduled 按 session-cleanup-interval-ms 触发，按最后访问时间淘汰。
-  session-ttl-minutes: ${AGENT_SESSION_TTL_MIN:120}
-  max-sessions: ${AGENT_MAX_SESSIONS:500}
-  session-cleanup-interval-ms: 600000
-
-  heuristic:
-    # 启发式路由：用正则先判定意图，命中则直接执行工具，省掉一次「让 LLM 决定调什么工具」的往返。
-    # 【为什么必须可配】它和下面的 strategy 是最需要线上灰度与快速回滚的两个开关，
-    # 改造前是 private static final，改一次要重新编译。
-    enabled: ${AGENT_HEURISTIC_ENABLED:true}
-    # FORCE_EXEC：命中即执行并跳过向量检索，最快，但错判时用户没有纠正机会
-    # RECOMMEND_LLM：命中结果作为「建议」写进提示词，由 LLM 决定，容错好但多一次往返
-    strategy: ${AGENT_HEURISTIC_STRATEGY:FORCE_EXEC}
-
-    # === 影子路由：为「把正则路由换成 LLM 自主选工具」积累决策依据 ===
-    # 每次请求异步多问一次「LLM 会选哪个工具」，和启发式的选择一起写进 AgentTrace 的
-    # SHADOW_ROUTE 阶段（status 就是判定结果）。不参与响应、不阻塞、异常不外抛。
-    # 看结果：GET /api/agent/traces/shadow-stats
-    #
-    # 【为什么要先影子再切换】正则表的规则数随工具数线性增长且互相干扰，几十个工具后必然失控，
-    # 换成 LLM 自主调用是明确方向；但直接切是拿线上质量赌一个没验证的假设。
-    # 注意：它会让每次请求多一次 LLM 调用（走轻量后端），验证完请关掉或调大 sample-every。
-    shadow:
-      enabled: ${AGENT_SHADOW_ENABLED:true}
-      # 每 N 次请求比对一次：1=每次都比，10=抽样 10%
-      sample-every: ${AGENT_SHADOW_SAMPLE_EVERY:1}
-      max-history-pairs: 3
-
-# Spring Boot 4.x Actuator + Spring AI 2.0 Observation（生产可开）
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info,metrics,prometheus
-  observations:
-    spring-ai:
-      enabled: true
-  metrics:
-    tags:
-      application: ${spring.application.name}
-
-# 文件存储配置
-storage:
-  upload-dir: ./uploads
-
-# InfluxDB 1.x 配置
-influxdb:
-  url: http://192.168.221.130:8086
-  username: influxdb
-  password: 123456
-  database: acucloud-dev
-  retention-policy: autogen
-  timeout-seconds: 30
-
-# === Prompt 工程化配置（可热修改，无需改代码） ===
-# 注：原 prompt.agent.max-history 已移除 —— PromptBuilder 注入了它却从未使用，
-# 真正控制历史轮数的是上面的 agent.memory-size。
-prompt:
-  agent:
-    role: 你是智能运维助手，支持设备查询、能耗分析与知识库问答
-  rag:
-    role: 你是专业的后端管理平台 AI 助手
+  profiles:
+    include:
+      - server        # application-server.yml
+      - db            # application-db.yml
+      - ai            # application-ai.yml
+      - rag           # application-rag.yml
+      - agent         # application-agent.yml
+      - storage       # application-storage.yml
+      - prompt        # application-prompt.yml
+      - auth          # application-auth.yml

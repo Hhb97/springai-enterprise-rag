@@ -606,6 +606,152 @@
             .table { font-size: 13px; }
             .table th, .table td { padding: 10px 12px; }
         }
+
+        /* ============== 用户信息 & 退出按钮 ============== */
+        .user-area {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-left: 12px;
+            padding-left: 20px;
+            border-left: 1px solid rgba(255,255,255,0.2);
+        }
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.9);
+            color: #4f46e5;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 800;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .user-name {
+            font-size: 13.5px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .logout-btn {
+            padding: 7px 13px;
+            border: 1px solid rgba(255,255,255,0.35);
+            background: rgba(255,255,255,0.1);
+            color: #fff;
+            border-radius: 9px;
+            cursor: pointer;
+            font-size: 12.5px;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            transition: all 0.18s;
+        }
+        .logout-btn:hover {
+            background: rgba(255,255,255,0.22);
+            transform: translateY(-1px);
+        }
+
+        /* ============== 登录弹窗 ============== */
+        #loginModal {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: rgba(0,0,0,0.65);
+            backdrop-filter: blur(5px);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            font-family: inherit;
+        }
+        #loginModal > div {
+            background: #fff;
+            border-radius: 16px;
+            padding: 40px;
+            width: 400px;
+            max-width: 90vw;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            color: #0f172a;
+        }
+        #loginModal h2 {
+            font-size: 22px;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 6px;
+            text-align: center;
+        }
+        #loginModal p.modal-sub {
+            text-align: center;
+            color: #64748b;
+            font-size: 14px;
+            margin-bottom: 28px;
+        }
+        #loginModal .modal-icon {
+            width: 64px;
+            height: 64px;
+            background: linear-gradient(135deg,#4f46e5,#7c3aed);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            font-size: 30px;
+        }
+        #loginModal label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: 8px;
+        }
+        #loginModal input[type="text"],
+        #loginModal input[type="password"] {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            font-size: 15px;
+            outline: none;
+            box-sizing: border-box;
+            margin-bottom: 20px;
+            transition: border-color 0.2s;
+            color: #0f172a;
+            background: #fff;
+        }
+        #loginModal input:focus { border-color: #6366f1; }
+        #loginModal #loginError {
+            display: none;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #dc2626;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 14px;
+        }
+        #loginModal button[type="submit"] {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg,#4f46e5,#7c3aed);
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        #loginModal button[type="submit"]:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 16px rgba(79, 70, 229, 0.3);
+        }
+        #loginModal .hint {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #9ca3af;
+        }
     </style>
 </head>
 <body>
@@ -616,6 +762,20 @@
                 <a href="/">聊天</a>
                 <a href="/docs.html" class="active">知识库</a>
                 <a href="/agent-trace.html">Agent 追踪</a>
+            </div>
+
+            <!-- 用户信息 & 退出 -->
+            <div class="user-area" id="userArea">
+                <div class="user-avatar" id="userAvatar">A</div>
+                <div class="user-name" id="userNameText">admin</div>
+                <button class="logout-btn" onclick="doLogout()" title="退出登录">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                        <polyline points="16 17 21 12 16 7"/>
+                        <line x1="21" y1="12" x2="9" y2="12"/>
+                    </svg>
+                    退出
+                </button>
             </div>
         </div>
     </div>
@@ -702,7 +862,7 @@
 
         async function loadDocuments() {
             try {
-                const res = await fetch('/api/docs/list');
+                const res = await authFetch('/api/docs/list');
                 documents = await res.json();
                 renderDocList(documents);
             } catch (err) {
@@ -811,7 +971,7 @@
             formData.append('createdBy', createdBy || 'admin');
 
             try {
-                const res = await fetch('/api/docs/upload', {
+                const res = await authFetch('/api/docs/upload', {
                     method: 'POST',
                     body: formData
                 });
@@ -831,7 +991,7 @@
 
         async function showVersions(documentId) {
             try {
-                const res = await fetch(`/api/docs/${documentId}/versions`);
+                const res = await authFetch(`/api/docs/${documentId}/versions`);
                 const versions = await res.json();
                 renderVersionList(versions);
                 document.getElementById('versionModal').classList.add('active');
@@ -897,7 +1057,7 @@
             formData.append('createdBy', updatedBy || 'admin');
 
             try {
-                const res = await fetch(`/api/docs/${documentId}/update`, {
+                const res = await authFetch(`/api/docs/${documentId}/update`, {
                     method: 'POST',
                     body: formData
                 });
@@ -919,7 +1079,7 @@
             if (!confirm('确定要发布这个版本吗？发布后将替换当前活跃版本。')) return;
 
             try {
-                const res = await fetch(`/api/docs/versions/${versionId}/publish`, {
+                const res = await authFetch(`/api/docs/versions/${versionId}/publish`, {
                     method: 'POST'
                 });
 
@@ -940,7 +1100,7 @@
             if (!confirm('确定要归档这个版本吗？归档后将不再参与检索。')) return;
 
             try {
-                const res = await fetch(`/api/docs/versions/${versionId}/archive`, {
+                const res = await authFetch(`/api/docs/versions/${versionId}/archive`, {
                     method: 'POST'
                 });
 
@@ -960,7 +1120,7 @@
             if (!confirm('确定要删除这个版本吗？')) return;
 
             try {
-                const res = await fetch(`/api/docs/versions/${versionId}`, {
+                const res = await authFetch(`/api/docs/versions/${versionId}`, {
                     method: 'DELETE'
                 });
 
@@ -981,7 +1141,7 @@
             if (!confirm('确定要删除整个文档及其所有版本吗？此操作不可恢复！')) return;
 
             try {
-                const res = await fetch(`/api/docs/${documentId}`, {
+                const res = await authFetch(`/api/docs/${documentId}`, {
                     method: 'DELETE'
                 });
 
@@ -1001,7 +1161,7 @@
             if (!confirm('确定要重建知识库吗？这将重新处理所有活跃文档。')) return;
 
             try {
-                const res = await fetch('/api/docs/ingest-all', {
+                const res = await authFetch('/api/docs/ingest-all', {
                     method: 'POST'
                 });
 
@@ -1019,7 +1179,7 @@
 
         async function addToKB(versionId) {
             try {
-                const res = await fetch(`/api/docs/versions/${versionId}/add-to-kb`, {
+                const res = await authFetch(`/api/docs/versions/${versionId}/add-to-kb`, {
                     method: 'POST'
                 });
 
@@ -1048,6 +1208,160 @@
         }
 
         loadDocuments();
+    </script>
+
+    <!-- 登录弹窗 -->
+    <div id="loginModal">
+        <div>
+            <div class="modal-icon">🔐</div>
+            <h2>知识库管理</h2>
+            <p class="modal-sub">请输入登录凭证</p>
+            <form id="loginForm">
+                <label>用户名</label>
+                <input type="text" id="loginUsername" placeholder="请输入用户名" required>
+                <label>密码</label>
+                <input type="password" id="loginPassword" placeholder="请输入密码" required>
+                <div id="loginError"></div>
+                <button type="submit">登录</button>
+            </form>
+            <p class="hint">默认凭证: admin / admin123</p>
+        </div>
+    </div>
+
+    <script>
+        // ========== 认证状态管理 ==========
+        let authToken = localStorage.getItem('authToken') || null;
+        let currentUsername = localStorage.getItem('username') || null;
+
+        function refreshUserDisplay() {
+            const userArea = document.getElementById('userArea');
+            const userAvatar = document.getElementById('userAvatar');
+            const userNameText = document.getElementById('userNameText');
+            if (!userArea) return;
+            if (currentUsername) {
+                userArea.style.display = 'flex';
+                userAvatar.textContent = currentUsername.charAt(0).toUpperCase();
+                userNameText.textContent = currentUsername;
+            } else {
+                userArea.style.display = 'none';
+            }
+        }
+
+        async function checkAuthStatus() {
+            try {
+                const resp = await fetch('/api/auth/status');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (!data.enabled) {
+                        currentUsername = null;
+                        refreshUserDisplay();
+                        return true;
+                    }
+                    if (data.authenticated) {
+                        currentUsername = data.username;
+                        localStorage.setItem('username', currentUsername || '');
+                        refreshUserDisplay();
+                        return true;
+                    }
+                    if (authToken) {
+                        refreshUserDisplay();
+                        return true;
+                    }
+                    refreshUserDisplay();
+                    showLoginModal();
+                    return false;
+                }
+            } catch (e) {
+                console.error('检查认证状态失败:', e);
+            }
+            if (!authToken) {
+                refreshUserDisplay();
+                showLoginModal();
+                return false;
+            }
+            refreshUserDisplay();
+            return true;
+        }
+
+        function showLoginModal() {
+            document.getElementById('loginModal').style.display = 'flex';
+            refreshUserDisplay();
+        }
+        function hideLoginModal() {
+            document.getElementById('loginModal').style.display = 'none';
+            refreshUserDisplay();
+        }
+
+        async function doLogout() {
+            if (!confirm('确定退出登录吗？')) return;
+            try {
+                await authFetch('/api/auth/logout', { method: 'POST' });
+            } catch (e) {}
+            authToken = null;
+            currentUsername = null;
+            localStorage.removeItem('authToken');
+            localStorage.removeItem('username');
+            refreshUserDisplay();
+            showLoginModal();
+        }
+
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('loginUsername').value;
+            const password = document.getElementById('loginPassword').value;
+            const errorEl = document.getElementById('loginError');
+            errorEl.style.display = 'none';
+            try {
+                const resp = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    credentials: 'include',
+                    body: 'username=' + encodeURIComponent(username) + '&password=' + encodeURIComponent(password)
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    authToken = data.token;
+                    currentUsername = data.username;
+                    localStorage.setItem('authToken', authToken);
+                    localStorage.setItem('username', currentUsername);
+                    hideLoginModal();
+                    loadDocuments();
+                } else {
+                    errorEl.textContent = data.message || '登录失败';
+                    errorEl.style.display = 'block';
+                }
+            } catch (e) {
+                errorEl.textContent = '网络错误，请重试';
+                errorEl.style.display = 'block';
+            }
+        });
+
+        async function authFetch(url, options = {}) {
+            const headers = options.headers || {};
+            if (authToken) {
+                headers['Authorization'] = 'Basic ' + authToken;
+            }
+            const resp = await fetch(url, {
+                ...options,
+                headers,
+                credentials: 'include'
+            });
+            if (resp.status === 401) {
+                authToken = null;
+                currentUsername = null;
+                localStorage.removeItem('authToken');
+                localStorage.removeItem('username');
+                refreshUserDisplay();
+                showLoginModal();
+                throw new Error('Unauthorized');
+            }
+            return resp;
+        }
+
+        refreshUserDisplay();
+        checkAuthStatus().then(ok => {
+            if (ok) loadDocuments();
+        });
     </script>
 </body>
 </html>

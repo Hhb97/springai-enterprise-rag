@@ -351,6 +351,56 @@
             transform: translateY(-1px);
         }
 
+        /* ============== 用户信息 & 退出按钮 ============== */
+        .user-area {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #4f46e5, #7c3aed);
+            color: #fff;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 700;
+            box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3);
+        }
+        .user-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-soft);
+        }
+        .logout-btn {
+            padding: 8px 14px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 13px;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.18s;
+        }
+        .logout-btn:hover {
+            background: #fef2f2;
+            color: #dc2626;
+            border-color: #fecaca;
+        }
+        [data-theme="dark"] .logout-btn:hover,
+        body:not([data-theme]) .logout-btn:hover {
+            background: rgba(239, 68, 68, 0.12);
+            color: #f87171;
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+
         .spacer { flex: 1; }
 
         .layout { 
@@ -894,6 +944,21 @@
                 <span>🔄</span> 刷新列表
             </button>
             <div class="spacer"></div>
+
+            <!-- 用户信息 & 退出 -->
+            <div class="user-area" id="userArea">
+                <div class="user-avatar" id="userAvatar">A</div>
+                <div class="user-name" id="userNameText">admin</div>
+                <button class="logout-btn" onclick="doLogout()" title="退出登录">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                        <polyline points="16 17 21 12 16 7"/>
+                        <line x1="21" y1="12" x2="9" y2="12"/>
+                    </svg>
+                    退出
+                </button>
+            </div>
+
             <button class="btn btn-ghost" onclick="loadRecent()">
                 <span>⏱</span> 自动刷新
             </button>
@@ -928,7 +993,198 @@
         </div>
     </div>
 
+    <!-- 登录弹窗 -->
+    <div id="loginModal" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,0.6); backdrop-filter:blur(4px); align-items:center; justify-content:center;">
+        <div style="background:#fff; border-radius:16px; padding:40px; width:400px; max-width:90vw; box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+            <div style="text-align:center; margin-bottom:32px;">
+                <div style="width:64px; height:64px; background:linear-gradient(135deg,#4f46e5,#7c3aed); border-radius:16px; display:inline-flex; align-items:center; justify-content:center; margin-bottom:16px;">
+                    <span style="font-size:32px;">🔐</span>
+                </div>
+                <h2 style="font-size:24px; font-weight:700; color:#0f172a; margin-bottom:8px;">智能运维助手</h2>
+                <p style="color:#64748b; font-size:14px;">请输入登录凭证</p>
+            </div>
+            <form id="loginForm">
+                <div style="margin-bottom:20px;">
+                    <label style="display:block; font-size:14px; font-weight:600; color:#374151; margin-bottom:8px;">用户名</label>
+                    <input type="text" id="loginUsername" required
+                           style="width:100%; padding:14px 16px; border:2px solid #e5e7eb; border-radius:10px; font-size:15px; outline:none; transition:border-color 0.2s;"
+                           placeholder="请输入用户名">
+                </div>
+                <div style="margin-bottom:24px;">
+                    <label style="display:block; font-size:14px; font-weight:600; color:#374151; margin-bottom:8px;">密码</label>
+                    <input type="password" id="loginPassword" required
+                           style="width:100%; padding:14px 16px; border:2px solid #e5e7eb; border-radius:10px; font-size:15px; outline:none; transition:border-color 0.2s;"
+                           placeholder="请输入密码">
+                </div>
+                <div id="loginError" style="display:none; background:#fef2f2; border:1px solid #fecaca; color:#dc2626; padding:12px; border-radius:8px; margin-bottom:16px; font-size:14px;"></div>
+                <button type="submit"
+                        style="width:100%; padding:14px; background:linear-gradient(135deg,#4f46e5,#7c3aed); color:#fff; border:none; border-radius:10px; font-size:16px; font-weight:600; cursor:pointer; transition:transform 0.2s, box-shadow 0.2s;">
+                    登录
+                </button>
+            </form>
+            <p style="text-align:center; margin-top:20px; font-size:12px; color:#9ca3af;">
+                默认凭证: admin / admin123
+            </p>
+        </div>
+    </div>
+
     <script>
+        // ========== 认证状态管理 ==========
+        let authToken = localStorage.getItem('authToken') || null;
+        let currentUsername = localStorage.getItem('username') || null;
+
+        // 更新用户信息显示
+        function refreshUserDisplay() {
+            const userArea = document.getElementById('userArea');
+            const userAvatar = document.getElementById('userAvatar');
+            const userNameText = document.getElementById('userNameText');
+            if (!userArea) return;
+
+            if (currentUsername) {
+                userArea.style.display = 'flex';
+                userAvatar.textContent = currentUsername.charAt(0).toUpperCase();
+                userNameText.textContent = currentUsername;
+            } else {
+                userArea.style.display = 'none';
+            }
+        }
+
+        // 检查是否已登录
+        async function checkAuthStatus() {
+            try {
+                const resp = await fetch('/api/auth/status');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    // 认证未启用 → 直接放行
+                    if (!data.enabled) {
+                        currentUsername = null;
+                        refreshUserDisplay();
+                        return true;
+                    }
+                    // 后端 Session 已认证 → 放行
+                    if (data.authenticated) {
+                        currentUsername = data.username;
+                        localStorage.setItem('username', currentUsername || '');
+                        refreshUserDisplay();
+                        // 如果本地没有 token 但后端有 session，说明是通过 session 登录的，不需要弹窗
+                        return true;
+                    }
+                    // 后端认证启用但未登录，检查本地是否有 token
+                    // 如果有 token，尝试用它（后面的请求会验证）
+                    if (authToken) {
+                        refreshUserDisplay();
+                        return true; // 让后续 authFetch 去验证 token 的有效性
+                    }
+                    // 没有任何认证信息 → 显示登录弹窗
+                    refreshUserDisplay();
+                    showLoginModal();
+                    return false;
+                }
+            } catch (e) {
+                console.error('检查认证状态失败:', e);
+            }
+            // 出错时，如果有本地 token，继续尝试；否则显示登录弹窗
+            if (!authToken) {
+                refreshUserDisplay();
+                showLoginModal();
+                return false;
+            }
+            refreshUserDisplay();
+            return true;
+        }
+
+        // 显示登录弹窗
+        function showLoginModal() {
+            document.getElementById('loginModal').style.display = 'flex';
+            refreshUserDisplay();
+        }
+
+        // 隐藏登录弹窗
+        function hideLoginModal() {
+            document.getElementById('loginModal').style.display = 'none';
+            refreshUserDisplay();
+        }
+
+        // 登出
+        async function doLogout() {
+            if (!confirm('确定退出登录吗？')) return;
+            try {
+                await authFetch('/api/auth/logout', { method: 'POST' });
+            } catch (e) {}
+            authToken = null;
+            currentUsername = null;
+            localStorage.removeItem('authToken');
+            localStorage.removeItem('username');
+            refreshUserDisplay();
+            showLoginModal();
+        }
+
+        // 登录表单提交
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const username = document.getElementById('loginUsername').value;
+            const password = document.getElementById('loginPassword').value;
+            const errorEl = document.getElementById('loginError');
+
+            errorEl.style.display = 'none';
+
+            try {
+                const resp = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    credentials: 'include', // 重要：携带 Cookie/Session
+                    body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+                });
+
+                const data = await resp.json();
+
+                if (data.success) {
+                    authToken = data.token;
+                    currentUsername = data.username;
+                    localStorage.setItem('authToken', authToken);
+                    localStorage.setItem('username', currentUsername);
+                    hideLoginModal();
+                    // 登录成功后，加载数据
+                    loadStats();
+                    loadRecent();
+                } else {
+                    errorEl.textContent = data.message || '登录失败';
+                    errorEl.style.display = 'block';
+                }
+            } catch (e) {
+                errorEl.textContent = '网络错误，请重试';
+                errorEl.style.display = 'block';
+            }
+        });
+
+        // 带有认证的 fetch 封装
+        async function authFetch(url, options = {}) {
+            const headers = options.headers || {};
+            if (authToken) {
+                headers['Authorization'] = `Basic ${authToken}`;
+            }
+            const resp = await fetch(url, {
+                ...options,
+                headers,
+                credentials: 'include' // 重要：携带 Cookie/Session
+            });
+
+            // 如果返回 401，清除 token 并显示登录弹窗
+            if (resp.status === 401) {
+                authToken = null;
+                currentUsername = null;
+                localStorage.removeItem('authToken');
+                localStorage.removeItem('username');
+                refreshUserDisplay();
+                showLoginModal();
+                throw new Error('Unauthorized');
+            }
+            return resp;
+        }
+
+        // 初始化用户显示
+        refreshUserDisplay();
+
         let allTraces = [];
         let activeSessionId = null;
         let sessions = new Map();
@@ -980,7 +1236,7 @@
 
         async function loadStats() {
             try {
-                const r = await fetch('/api/agent/traces/stats').then(r => r.json());
+                const r = await authFetch('/api/agent/traces/stats').then(r => r.json());
                 if (r && r.data) {
                     document.getElementById('stat24h').textContent = r.data.last24hCount ?? '--';
                     document.getElementById('stat7d').textContent = r.data.last7dCount ?? '--';
@@ -994,7 +1250,7 @@
             listEl.innerHTML = `<div class="empty-state"><div class="icon"><div class="loading"></div></div><p>正在加载最近 ${limit} 条记录...</p></div>`;
 
             try {
-                const r = await fetch(`/api/agent/traces/recent?limit=${limit}`).then(r => r.json());
+                const r = await authFetch(`/api/agent/traces/recent?limit=${limit}`).then(r => r.json());
                 allTraces = (r && r.data) ? r.data : [];
                 let errCnt = 0, hitCnt = 0, hitTotal = 0;
                 sessions = new Map();
@@ -1147,9 +1403,15 @@
         }
 
         document.getElementById('searchSession').addEventListener('input', renderSessionList);
+        document.getElementById('limitSel').addEventListener('change', loadRecent);
 
-        loadStats();
-        loadRecent();
+        // 页面加载时检查认证状态
+        checkAuthStatus().then(authenticated => {
+            if (authenticated) {
+                loadStats();
+                loadRecent();
+            }
+        });
     </script>
 </body>
 </html>

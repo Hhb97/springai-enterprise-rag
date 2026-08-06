@@ -1,0 +1,16 @@
+﻿# ============================================================
+# 存储：文件上传目录 + InfluxDB 1.x
+# ============================================================
+
+# 文件存储配置
+storage:
+  upload-dir: ./uploads
+
+# InfluxDB 1.x 配置
+influxdb:
+  url: http://192.168.221.130:8086
+  username: influxdb
+  password: 123456
+  database: acucloud-dev
+  retention-policy: autogen
+  timeout-seconds: 30

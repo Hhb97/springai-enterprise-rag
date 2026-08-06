@@ -1,0 +1,29 @@
+# ============================================================
+# 服务基础配置：端口、日志格式、监控端点
+# ============================================================
+
+server:
+  port: 8900
+
+# 日志格式：TraceId 来自 TraceIdFilter（MDC traceId），排查链路不用靠时间戳对日志
+#  - [%X{traceId}]：MDC 里的 traceId，空值时输出 [] 不影响格式对齐
+#  - 其他字段顺序按生产常见：时间 → 线程 → traceId → 级别 → logger(36字符截断) → 消息
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [traceId=%X{traceId:-}] %-5level %logger{36} - %msg%n"
+  level:
+    # Spring AI 内部 Tool Calling 循环日志很有用，INFO 级别可以看到每轮 LLM 决策
+    root: INFO
+
+# Spring Boot 4.x Actuator + Spring AI 2.0 Observation（生产可开）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  observations:
+    spring-ai:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
