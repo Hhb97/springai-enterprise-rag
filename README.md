@@ -1,21 +1,25 @@
-# 智能运维 RAG 助手 — Spring Boot 4 + Spring AI 2.0 GA
+# 智能运维 RAG + Agent 一体化平台
 
-> 企业级知识库问答 + 智能 Agent 一体化平台：DDD 四层架构 + 六边形端口适配器，内置混合检索、语义切分、查询改写、自动工具调用、启发式路由、文档版本管理、决策链路审计全链路能力，同时适配本地 Ollama（离线）与阿里云百炼 DashScope（云端）双后端。
+> 基于 Spring Boot 4.0.7 + Spring AI 2.0.0 GA + JDK 21 的企业级知识库问答与智能 Agent 平台。采用 DDD 四层 + 六边形（Port-Adapter）架构，内置 **双模式 Agent**（原生 Tool Calling / 手动 ReAct 循环）、**混合检索**（向量 + 关键词线性加权融合）、**启发式路由 + 影子路由比对**、**Prompt Injection 防护**、**文档版本状态机**、**决策链路全审计** 等完整能力，同时适配本地 Ollama（离线）与阿里云百炼 DashScope（云端）双后端。
 
 ---
 
-## ✨ 核心能力
+## ✨ 核心能力一览
 
-| 模块 | 能力说明 | 关键特性 |
-|------|---------|---------|
-| **🧠 RAG 混合检索** | 向量 + 关键词线性加权融合 | 向量 0.7 + 关键词 0.3；中文同义词扩展（账单↔计费、报表↔报告）；N-gram 分词兜底；headingPath 标题词额外加权 |
-| **✂️ 语义切分** | 递归语义边界 + Markdown 结构感知 | OverlappingTextSplitter 四级分隔符降级；MarkdownSectionParser 保留完整标题路径 `A > B > C`；chunk 正文前置章节提示 |
-| **🔁 查询改写** | 多轮省略式问题还原 | 独立 LLM 后端 + 3s 超时守护；三层零成本门禁（80% 问句跳过 LLM）；改写结果仅用于检索，不污染对话历史 |
-| **🤖 Agent 自动工具调用** | Spring AI 2.0 官方 ChatClient 循环 | 6 个 `@Tool` 注解方法自动注册；LLM → tool_call 检测 → 反射调用 → ToolMessage 回填 → 最多 5 轮直到最终回答 |
-| **⚡ 启发式路由** | FORCE_EXEC 前置命中跳过检索 | 列出设备、近 N 天能耗等高频纯工具场景，不进向量检索、不跑 Agent 循环，延迟最低 |
-| **📚 文档版本管理** | 状态机 + REST 全套接口 | DRAFT → ACTIVE → ARCHIVED → DELETED；**发布时才入库向量**；增量更新只清该文档旧向量，不动全库 |
+| 模块 | 能力说明 | 关键实现细节 |
+|------|---------|-------------|
+| **🧠 RAG 混合检索** | 向量检索 + 关键词检索线性加权融合 | 权重：向量 0.7 / 关键词 0.3；内置 10 组业务同义词扩展（账单↔计费等）；中文 N-gram 滑窗分词兜底；标题 headingPath 额外加权；相似度阈值卡向量分不卡融合分 |
+| **✂️ 语义切分** | Markdown 结构感知 + 四级分隔符递归降级 | `OverlappingTextSplitter` 按段落→换行→句末→字符逐级切分；`MarkdownSectionParser` 保留完整标题路径 `A > B > C`；Chunk 正文可前置章节前缀注入 embedding |
+| **🔁 查询改写** | 多轮省略式问题还原（独立 LLM 后端） | 默认用 qwen-turbo 非推理模型（3s 超时守护）；改写结果仅用于检索，**不污染对话历史**；改写关闭时退回启发式历史拼接 |
+| **🤖 原生 Tool Calling** | Spring AI 2.0 `ChatClient.tools()` 官方循环 | `@Tool` 注解自动注册 6 个设备/能耗工具；框架内部最多 5 轮循环；附带 **TextToolCallParser** 兜底识别模型把调用写成文本 JSON 的场景 |
+| **🧠 手动 ReAct 循环** | Thought → Action → Observation 全流程 | `ReActAgentAppService` 手写 ReAct 循环；每一步严格 JSON 格式解析；支持 **SSE 流式推送**（step_start → thought_delta → action_start → final_delta → done） |
+| **🔀 对比模式** | Agent vs ReAct 同请求双跑 | `POST /ai/compare-chat` 一份请求同时跑两条链路，返回 elapsed / steps / answer，用于效果评估 |
+| **⚡ 启发式路由** | FORCE_EXEC / RECOMMEND_LLM 双策略 | 列出设备、近 N 天能耗等高频纯工具场景，FORCE_EXEC 直接跳检索跳 LLM；RECOMMEND_LLM 把建议交给模型拍板 |
+| **👥 影子路由** | 正则 vs LLM 异步灰盒比对 | 每次请求异步多问一次「LLM 会选哪个工具」，7 种判定结果写入 AgentTrace，为替换正则路由积累真实数据 |
+| **🛡️ 安全防护** | Prompt Injection 拦截 + 三级幻觉防线 | 三类攻击模式：忽略指令 / 角色篡改 / 规则绕过；幻觉防护：相似度阈值 + 保底块标记 + 低置信度提示词降级 |
+| **📚 文档版本管理** | DRAFT → ACTIVE → ARCHIVED 状态机 | **发布时才入库向量**；增量更新只清该文档旧向量，不动全库；10 个 REST 接口全覆盖 |
 | **🔍 决策链路审计** | 每轮 Agent 决策全落库 | LLM 决策、工具入参/出参、耗时、异常；按 Session 回放；内置可视化页面 `agent-trace.html` |
-| **📊 可观测性** | 全链路 TraceId | `TraceIdFilter` MDC 贯通；日志 `[traceId=xxx]` 对齐；Actuator + Prometheus 基础已就绪 |
+| **📊 可观测性** | 全链路 TraceId | `TraceIdFilter` MDC 贯通；日志 `[traceId=xxx]` 对齐；Actuator + Prometheus 就绪 |
 
 ---
 
@@ -23,14 +27,16 @@
 
 | 分层 | 选型 | 版本要求 |
 |------|------|---------|
-| 语言 / 框架 | JDK 21 · Spring Boot 4.0.7 GA · Spring Framework 7.0.8 | JDK 必须 21+ |
-| AI 框架 | Spring AI 2.0.0 GA（groupId `org.springframework.ai`） | 含 `spring-ai-rag` 模块 |
-| 聊天模型后端 | **二选一**：Ollama `qwen2.5:1.5b` / DashScope `qwen3.7-flash` | 支持 OpenAI 兼容协议任意后端 |
-| 向量化模型 | 推荐 Ollama `nomic-embed-text`（免费、离线） | 也可切 DashScope `text-embedding-v3` |
-| 向量库 | SimpleVectorStore + JSON 持久化 | 通过 `VectorStorePort` 可无缝切 PGVector/Milvus |
+| 语言 / 框架 | JDK 21 · Spring Boot **4.0.7** GA · Spring Framework 7.0.8 | JDK 必须 21+ |
+| AI 框架 | Spring AI **2.0.0** GA（groupId `org.springframework.ai`） | 含 `spring-ai-rag` 模块（预留后续 BM25/RRF 升级接口） |
+| 聊天模型 | 三选一：Ollama `qwen2.5:1.5b` / DashScope `qwen3.7-flash` / 任意 OpenAI 兼容协议 | 支持混用：聊天/改写/向量各选各的后端 |
+| 向量化模型 | 推荐 Ollama `nomic-embed-text`（免费、离线），或 DashScope `text-embedding-v3` | docker-compose 默认 `bge-m3` |
+| 向量库 | SimpleVectorStore + JSON 持久化 | 通过 `VectorStorePort` 可无缝切换 PGVector/Milvus/RedisSearch |
 | 元数据存储 | H2 File Mode + Hibernate 7.2 | 生产可替换 PostgreSQL，方言已显式配置 |
-| 时序数据（能耗） | InfluxDB 1.8 SQL 聚合查询 | 通过 `TimeSeriesDbPort` 适配 |
-| 前端页面 | 原生 HTML + JS（零构建） | 三个内置页面：聊天 / 知识库管理 / 决策审计 |
+| 时序数据 | InfluxDB 1.8 SQL 聚合查询 | 通过 `TimeSeriesDbPort` 适配 |
+| 前端 | 原生 HTML + JS（零构建） | 聊天 / 知识库管理 / 决策审计 三页内置 |
+
+> ⚠️ **关于 BM25 / RRF**：Spring AI 2.0.0 GA 已将 `BM25Retriever` + `EnsembleRetriever` 从 GA 包移除（目前仅在 M 系列里程碑中），本项目采用自定义的**线性加权融合检索**替代（五层防线设计见下文），`pom.xml` 已引 `spring-ai-rag` 做预留，等后续版本加回 BM25/RRF 后，只需替换 `RagAppService.java:buildRetriever()` 即可，接口层零改动。
 
 ---
 
@@ -41,213 +47,288 @@ src/main/java/com/example/ragassitant/
 │
 ├── application/                    # 【应用层】用例编排，不含业务规则
 │   └── service/
-│       ├── AgentAppService             # 核心编排：FORCE_EXEC 前置 → QueryRewrite → RAG 检索 → ChatClient 自动 Tool Calling
-│       ├── ChatAppService              # 普通 RAG 问答（不带 Agent）
-│       ├── DocumentAppService          # 文档版本状态机 + 发布时向量清理
+│       ├── AgentAppService             # 三路径编排：闲聊短路 → FORCE_EXEC → 原生 Tool Calling
+│       ├── ReActAgentAppService        # 手动 ReAct 循环：普通 + SSE 流式 双入口
+│       ├── RagAppService               # 混合检索（线性加权 + 幻觉防护三级闸门）
 │       ├── IngestAppService            # 文件分派 → 切分 → 向量入库
+│       ├── DocumentAppService          # 文档版本状态机 + 发布时向量清理
 │       ├── QueryRewriteService         # 多轮省略问句改写 + 超时降级
-│       └── RagAppService               # 混合检索（向量 + 关键词线性加权 + 同义词扩展）
+│       └── ShadowToolRouter            # 影子路由：LLM vs 正则异步比对，7 类判定
 │
 ├── domain/                         # 【领域层】纯 POJO，零 Spring / 外部依赖
 │   ├── model/                          # Device, EnergyRecord, ToolCall, RagAnswer, ChunkMetaKeys
-│   ├── service/                        # HeuristicRouter, ToolCallParser/Validator, PromptBuilder, EnergyAggregator
+│   ├── service/                        # HeuristicRouter, TextToolCallParser, PromptBuilder, ...
 │   └── spi/                            # ← Port（端口接口，被 Application 层依赖）
-│       ├── LlmPort                         # chat · chatWithRawMessages · chatWithAutoToolCalling
+│       ├── LlmPort                     # chat / chatWithRawMessages / chatWithAutoToolCalling / chatStream*
 │       ├── VectorStorePort / TimeSeriesDbPort
 │       ├── DocumentReaderPort / ConversationStorePort
 │       └── ToolRegistryPort / AgentTraceStorePort
 │
 ├── infrastructure/                 # 【基础设施层】Adapter 实现 Port
-│   ├── llm/        SpringAiOllamaAdapter        # ChatClient + 自动 Tool Calling（@Primary）
+│   ├── llm/        SpringAiChatAdapter        # ChatClient + 自动 Tool Calling（@Primary）
 │   ├── vector/     SpringAiSimpleVectorAdapter  # deleteAll / deleteByDocId 增量清理
 │   ├── tsdb/       InfluxDB18TimeSeriesAdapter  # 6 种时间范围 + 重聚合
-│   ├── session/    InMemoryConversationStore    # 多轮会话记忆
-│   ├── agent/      DeviceTools.java             # 6 个 @Tool + @ToolParam 方法
-│   ├── reader/     SpringAiDocumentReader       # md/pdf/word/excel；MarkdownSectionParser；OverlappingTextSplitter
-│   ├── config/     VectorStoreInfraConfig / LlmBackendConfig（双后端选择）
+│   ├── session/    InMemoryConversationStore    # 多轮会话记忆 + TTL 定时清理
+│   ├── agent/
+│   │   ├── DeviceTools.java             # 6 个 @Tool 方法（设备/能耗查询）
+│   │   ├── ToolCatalog.java             # 工具清单渲染（ReAct 提示词 / 影子路由用）
+│   │   ├── SpringAiToolRegistry.java    # ToolRegistryPort 实现（反射调用 + 参数校验）
+│   │   └── TracingToolCallback.java     # 原生 Tool Calling 触发时打 trace
+│   ├── reader/     SpringAiDocumentReader       # md/pdf/word/excel；MarkdownSectionParser
+│   ├── config/     VectorStoreInfraConfig / LlmBackendConfig（多后端 + 改写独立后端）
 │   └── persistence/jpa/
 │       ├── DocumentVersionJpaEntity + Repository（文档状态机）
 │       └── AgentTraceJpaEntity + Repository + JpaAgentTraceStoreAdapter
 │
 ├── interfaces/                     # 【接口层】HTTP <-> DTO，零业务逻辑
 │   ├── rest/
-│   │   ├── ChatController.java         # /ai/chat, /ai/agent-chat, /ai/ingest*
+│   │   ├── ChatController.java         # /ai/chat, /ai/agent-chat, /ai/react-agent-chat, ...
 │   │   ├── DocumentController.java     # /api/docs/**（版本管理 10 个接口）
-│   │   └── AgentTraceController.java   # /api/agent/traces/**
+│   │   ├── AgentTraceController.java   # /api/agent/traces/**（审计 + 影子路由统计）
+│   │   └── AuthController.java         # Basic Auth 登录接口
 │   └── dto/request / response
 │
 └── common/                         # 横切关注点
-    ├── trace/      TraceIdFilter（MDC 注入 + X-Trace-Id 请求头透传）
+    ├── trace/      TraceIdFilter（MDC 注入 + X-Trace-Id 透传）
+    ├── filter/     BasicAuthFilter（可开关 Basic 认证）
     ├── utils/      SnUtils（SN 归一化去空格/括号）
     └── exception/  BizException + GlobalExceptionHandler
 ```
 
-依赖方向：`Interfaces → Application → Domain ← Infrastructure`（依赖倒置，Ports 定义在 Domain 层，Adapters 实现在 Infrastructure 层）。
+**依赖方向**：`Interfaces → Application → Domain ← Infrastructure`（依赖倒置：Ports 定义在 Domain 层，Adapters 实现在 Infrastructure 层）。
 
 ---
 
-## 💡 核心逻辑详解：RAG 检索
+## 💡 核心逻辑详解一：Agent 三路径 + 双模式
 
-### 1. 为什么不用纯向量检索？痛点是什么？
-纯向量检索的典型问题在这个项目里全部踩过：
+### 1. 两种 Agent 实现对比
+
+| 模式 | 实现类 | 循环方式 | 适用模型 | 流式输出 |
+|------|-------|---------|---------|---------|
+| **Spring AI 原生 Tool Calling** | `AgentAppService` | `ChatClient.tools(...)` 框架内部循环 | 支持 function calling：qwen3.7-flash / gpt-4o-mini 等 | ❌ 返回最终结果 |
+| **手动 ReAct 循环** | `ReActAgentAppService` | 手写 `for (step 1..maxSteps)` + 严格 JSON 解析 | 不支持 function calling 的小模型：qwen2.5:1.5b 等 | ✅ SSE 逐 thought/action 推送 |
+
+两种模式可独立使用，也可通过 `/ai/compare-chat` 同请求对比效果（返回 elapsed/steps/answer 差异）。
+
+### 2. AgentAppService：请求必走三路径之一（且仅走一条）
+
+```
+用户提问
+  │
+  ├─① 闲聊短路（你好/谢谢/你是谁/再见...）
+  │    → handleSmallTalk()：不带历史、不带检索、不带工具，纯对话
+  │
+  ├─② Prompt Injection 检测（忽略指令/角色篡改/规则绕过）
+  │    → 拦截，返回固定拒绝语
+  │
+  ├─③ 启发式命中 FORCE_EXEC 策略
+  │    → handleForcedTool()：直接调工具 + LLM 总结，跳过向量检索
+  │
+  └─④ 其他所有情况
+       → handleAutoAgent()：
+           a. RAG 混合检索（异常降级不阻断；保底块直接丢弃）
+           b. 若策略为 RECOMMEND_LLM：把启发式选择作「建议」附到提示词末尾
+           c. Spring AI 2.0 ChatClient.tools() 内部循环（最多 5 轮）
+           d. 弱模型兜底：模型把工具调用写成文本 JSON → TextToolCallParser 补执行
+```
+
+三条路径统一由 `finish()` 收口：记 FINAL trace → 写会话历史 → 构造响应，避免各路径不一致。
+
+### 3. 闲聊为什么必须前置？
+
+这是从真实线上事故抠出来的防线：用户第一句「列出所有设备」（正确回答），第二句只说「你好」→ 走 RAG 检索必然召回电能质量 FAQ → FAQ 以「知识库参考内容」名义拼进提示词 → 模型回「我已经阅读了知识库中的内容…」并把 FAQ 整段总结。用户看到的是一次没人问过的知识库问答。
+
+所以闲聊必须在 **改写 / 路由 / 检索** 三者之前一起短路。
+
+### 4. 影子路由：为架构升级积累决策依据
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  ShadowToolRouter（异步、不阻塞、异常不外抛）                  │
+│                                                             │
+│  用户提问 → 启发式路由选了 ToolA                              │
+│       │                                                     │
+│       └─── 影子线程池（shadow-route）异步多问一次 LLM：        │
+│            "根据工具清单和对话历史，该选哪个工具？"              │
+│                 │                                           │
+│                 ▼                                           │
+│            7 类比对结果写入 AgentTrace（SHADOW_ROUTE 阶段）：   │
+│              ✅ AGREE          工具+参数都一致                │
+│              ⚠️ TOOL_DIFF      选了不同工具（最需要人工看）     │
+│              ⚠️ ARGS_DIFF      同工具不同参数（口径差异）      │
+│              ⚠️ HEURISTIC_ONLY 正则命中了 LLM 认为不该调       │
+│              ⚠️ LLM_ONLY       LLM 认为该调 正则漏了           │
+│              ✅ BOTH_NONE      两边都认为不需要调              │
+│              ❓ UNKNOWN        LLM 输出解析失败                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+查看统计：`GET /api/agent/traces/shadow-stats`。验证完记得关，它会让每次请求多一次 LLM 调用。
+
+---
+
+## 💡 核心逻辑详解二：RAG 检索的幻觉防线
+
+### 1. 为什么不用纯向量检索？中文 RAG 的典型盲区
+
 ```
 用户问："手动账单流程"        文档写的是："手动计费流程"
           ↓ 纯向量（余弦相似度）↓
      命中 "支付宝对账说明"（语义接近"账单"）   完全漏了 "手动计费流程"（"账单"≠"计费"字面差太远）
 ```
-→ 这就是**同义词 / 近义词盲区**，是中文 RAG 纯向量方案必踩的坑。
+
+→ **同义词 / 近义词盲区**，是中文 RAG 纯向量方案必踩的坑。
 
 ### 2. 本项目的 RAG 检索五层防线
 
 | # | 防线 | 代码位置 | 解决的问题 |
 |---|------|---------|-----------|
-| ① | **同义词硬规则扩展** | `RagAppService.java:expandKeywordsWithSynonyms()` | 账单↔计费 / 报表↔报告 / 登录↔登入 / 用户↔账号，固定 10 对高频业务词，零成本 0 误判 |
-| ② | **中文 N-gram 分词兜底** | `RagAppService.java:ngramSplit()` | 长词拆成 2~4 字滑窗："手动账单流程" → "手动 动账 账单 单流 流程 手动账 动账单 账单流 单流程"，总有一个子串命中 |
-| ③ | **双通道线性加权融合** | `RagAppService.java:retrieveDocuments()` 融合公式：`score = 0.7*向量分 + 0.3*关键词分` | 向量负责模糊语义，关键词负责精确字面；权重 0.7/0.3 是 1.5b 小模型实测最优（小模型语义弱，向量分不能占比太低） |
-| ④ | **标题 / 章节路径加权** | `RagAppService.java:keywordMatchScore()` 命中 title +0.5，命中 headingPath +0.4 | Markdown 标题 `## 手动计费流程` 是作者标注的主题，语义最强，必须单独加权（很多开源 RAG 把标题和正文一视同仁，白丢了 20% 召回率） |
-| ⑤ | **Chunk 正文前缀注入章节** | `SpringAiDocumentReader.java` 每行前置 `【章节:计费管理>账单>手动计费】` | embedding 编码时把标题词混进向量，用户问"账单流程"时向量也能命中"计费"这块 chunk，相当于**把关键词权重偷偷注入了向量通道** |
+| ① | **同义词硬规则扩展** | `RagAppService.java:SYNONYM_MAP` + `expandChineseKeywords()` | 账单↔计费 / 报表↔报告 / 登录↔登入 / 用户↔账号，固定 10 对高频业务词，零成本零误判 |
+| ② | **中文 N-gram 分词兜底** | `RagAppService.java:expandChineseKeywords()` 滑窗 | 长词拆成 2~4 字滑窗："手动账单流程" → "手动 动账 账单 单流 流程 手动账..."，总有一个子串命中 |
+| ③ | **双通道线性加权融合** | `RagAppService.java:linearWeightHybridSearch()` 融合公式 | `score = 0.7*向量分 + 0.3*关键词分`；向量负责模糊语义，关键词负责精确字面 |
+| ④ | **标题 / 章节路径加权** | `RagAppService.java:keywordSearchWithScore()` | 命中 title +0.5，命中 headingPath +0.4；标题是作者标注的主题，语义最强 |
+| ⑤ | **Chunk 正文前缀注入章节** | `SpringAiDocumentReader.java` | 每行前置 `【章节:计费管理>账单>手动计费】`，embedding 编码时把标题词混进向量 |
 
-> **为什么不接 BM25 / RRF / EnsembleRetriever？**  
-> Spring AI 2.0 GA 已经把 `BM25Retriever` + `EnsembleRetriever` 从 GA 包移除了（还在 M3 里程碑里），硬引会导致 BOM 版本漂移。  
-> 上面 5 层防线在中文领域 ≈ 带权重的 RRF，效果不输给标准 BM25 融合，且零额外依赖，**部署不会炸**。
+> **为什么不接标准 BM25 / RRF？**  
+> Spring AI 2.0 GA 已移除 BM25Retriever + EnsembleRetriever，硬引会导致 BOM 版本漂移。  
+> 上面 5 层防线在中文领域 ≈ 带业务权重的 RRF，效果不输给标准 BM25 融合，且零额外依赖，**部署不会炸**。
 
-### 3. 文档切分的"不切断语义"原则
+### 3. 幻觉防护三级闸门（现已全部接入代码）
+
+| 层级 | 机制 | 代码位置 |
+|------|------|---------|
+| ① **阈值闸门** | `VectorStoreDocumentRetriever` 显式设置 `similarityThreshold`（默认 0.40），低于阈值直接丢弃 | `RagAppService.java:buildRetriever()` |
+| ② **保底块标记** | 即使都低于阈值，`min-keep-chunks` 也会留 N 块，但打上 `belowThreshold=true` 标签；**向量层全低时关键词层不许单独救回** | `RagAppService.java:applyThreshold()` + `linearWeightHybridSearch()` |
+| ③ **提示词降级** | 纯 RAG 链路：全是保底块 → 切换到「不许强行总结」的低置信度提示词；Agent 链路：保底块直接丢弃（还有工具和常识能力，宁可空上下文也不要无关文档） | `RagAppService.java:askWithOptions()` + `AgentAppService.java:retrieveContext()` |
+
+### 4. 文档切分的"不切断语义"原则
+
 切分代码位于 `OverlappingTextSplitter.java`，四级分隔符**从粗到细递归降级**：
 ```
-L0 段落（\n\n\r\n\r\n） → L1 换行（\n） → L2 中文句末（。！？；、） → L3 英文句末（. ! ? ;） → L4 强制按字符切
+L0 段落（\n\n\r\n\r\n） → L1 换行（\n） → L2 中文句末（。！？；、） → L3 英文句末 → L4 强制按字符切
 ```
+
 两个关键设计：
-- **Overlap 不是硬切 N 字符**，而是「往回退到完整 atom 边界」——保证 overlap 开头一定是句子开头，不会出现"。哦对了开头补半句"这种半吊子上下文
-- **headingPath 一路透传**：`MarkdownSectionParser` 用栈维护标题路径，每个 chunk 的 metadata 都带 `A > B > C`，不会出现"h2 标题在 5 块之前，这块是正文，丢了主题"的经典问题
+- **Overlap 不是硬切 N 字符**，而是「往回退到完整 atom 边界」——保证 overlap 开头一定是句子开头
+- **headingPath 一路透传**：`MarkdownSectionParser` 用栈维护标题路径，每个 chunk 的 metadata 都带 `A > B > C`
 
-> **改完 chunk-size / overlap 后，必须跑 `POST /ai/ingest` 全量重建向量库**，否则旧向量库还是旧切分结果，不会自动生效。
-
----
-
-## 💡 核心逻辑详解：Agent 与启发式路由
-
-### 1. Agent 架构的三次演化
-这个项目 Agent 一共经历了三代，最终才是现在的样子：
-
-| 代际 | 实现方式 | 代码行数 | 痛点 |
-|------|---------|---------|------|
-| 第一代 | 手写 for 循环：LLM→解析 JSON→调工具→拼 ToolMessage→循环 | 约 120 行 | 小模型输出 JSON 格式不稳，少个引号整个循环炸；自己要处理 max_iteration / 死循环 |
-| 第二代 | `FunctionCallbackWrapper` + 手动注册 | 约 70 行 | 跟具体模型强绑定；Ollama 和 OpenAI 的 function call 响应字段名不一样，两套适配分支 |
-| **第三代（当前）** | **Spring AI 2.0 `ChatClient.tools(...)` 官方自动循环** | **1 行** | 适配层全部在 Spring AI；`@Tool` 注解自动生成 JSON Schema；超时/死循环框架自己兜 |
-
-当前最终形态代码（`AgentAppService.java` 的核心就是这一行）：
-```java
-String finalContent = ChatClient.builder(primaryChatModel).build()
-        .prompt()
-        .messages(toSpringMessages(messages))
-        .tools(deviceTools)      // ← DeviceTools 上 6 个 @Tool 注解方法全部自动注册
-        .call()
-        .content();             // ← 内部最多 5 轮循环，出来已经是最终纯文本回答
-```
-
-### 2. 为什么还要加「启发式路由 FORCE_EXEC」？
-官方 ChatClient 自动循环虽然好，但对**"列出所有设备""mv-003 近 30 天能耗"**这种纯工具高频问题，依然要走：
-```
-用户提问 → LLM 判断调哪个工具 → 解析 JSON → 调工具 → LLM 再总结
-= 至少两次 LLM 往返（1 次 tool_call 决策 + 1 次最终总结）
-≈ 本地 qwen2.5:1.5b 跑 3~5 秒
-```
-→ **延迟太高**，而且小模型对"列出设备"这种最简单的指令偶尔还会不识别 tool_call，直接自己瞎编一份设备清单。
-
-所以加了 `HeuristicRouter.route()` 前置判断，**在进 Agent 之前就先截胡**：
-
-| 判定顺序 | 规则 | 典型问句 |
-|---------|------|---------|
-| 1 | 有 SN + 追问结尾词（呢 / 怎么样 / 看看） | `mv-003呢` → 直接 `query_energy_by_days(30天)` |
-| 2 | 有 SN + 明确时间范围（近 N 天 / 半年 / 日期区间） | `mv-008 近半年能耗` → 直接 `query_energy_half_year` |
-| 3 | 有 SN + 聚合词（按月 / 按季 / 汇总） | `mv-003 按月汇总` → 直接 `aggregate_energy(month)` |
-| 4 | 无 SN + 明确设备清单指令 | `列出所有冷水机组` → 直接 `list_devices(keyword=冷水机组)` |
-| - | 以上都没命中 → 放行走官方 ChatClient Agent 循环 | 知识库问答 / 复杂多工具组合 / 用户意图不明确 |
-
-### 3. 历史参数继承的三层门禁（最容易写炸的部分）
-最容易踩的坑：**上一轮 `mv-005 半年能耗`，这一轮问 `如何创建用户呢？`，因为命中了"呢"被误判为追问，继承了 mv-005，把知识库问题劫持成能耗查询**。
-
-所以 `HeuristicRouter.isLikelySameToolTopic()` 是**优先级严格分层**的，不能改顺序：
-
-```java
-// 判定顺序（代码在 HeuristicRouter.java:66-95）
-1. 命中 TOPIC_SWITCH_CHAT_PATTERN   → 直接 false（"你好""你是什么模型""换个话题"这类明确的闲聊/身份问题）
-2. 命中 DOMAIN_WORD_PATTERN         → 直接 true（有 mv- / 能耗 / 按月 / 统计 这类领域实词才算同话题）
-3. 只命中 FOLLOWUP_MARKER（呢 / 如何 / 这个）→ 剥掉追问词后看残长
-     · 残长 ≤ 2（"那个呢" → 剩 ""）→ 是纯代词追问，才允许继承
-     · 残长 > 2（"如何创建用户呢？" → 剩 "创建用户" 4字）→ 是新问题，判 false
-```
-
-> **为什么要把「追问词」和「领域实词」拆成两张表？**  
-> 这是我们这轮实打实踩坑踩出来的：一开始把 "如何 / 呢 / 怎么样" 跟 "能耗 / mv- / 统计" 放同一张表里，只要命中任意一个就算同话题。线上就出现了 `如何创建用户呢？` 命中「如何」+「呢」被误判，知识库被劫持的 Bug。  
-> 正确逻辑是：**"如何 / 呢" 只表示"这是个问句"，对话题完全没有指示作用；只有"能耗 / mv- / 按月"才真正指示用户还在聊运维领域**。
+> ⚠️ **改完 chunk-size / overlap 后，必须跑 `POST /ai/ingest` 全量重建向量库**，否则旧向量库还是旧切分结果。
 
 ---
 
-## 🧠 RAG 完整工作流
+## 🧠 完整工作流
+
+### 1. 纯 RAG 问答（`/ai/chat`）
 
 ```
 用户提问（"手动账单流程？"）
    │
    ▼
-┌─────────────────────────────┐
-│ 1. 多轮上下文 Query 改写     │  仅多轮场景；独立 LLM 后端 3s 超时；
-│    "呢？" → "手动账单流程"   │  失败静默回退原问句
-└─────────────┬───────────────┘
-              ▼
-┌─────────────────────────────┐
-│ 2. 关键词扩展 + 中文分词     │  账单↔计费 同义词 → "手动账单流程 手动计费流程"
-│    N-gram 兜底切分           │  headingPath 命中额外加权 0.4 分
-└─────────────┬───────────────┘
-              ▼
-┌─────────────────────────────┐
-│ 3. 双通道并行检索            │  · 向量检索 topK*5（Spring AI 2.0 VectorStoreDocumentRetriever）
-│                              │  · 关键词全文检索（chunk + title + headingPath）
-└─────────────┬───────────────┘
-              ▼
-┌─────────────────────────────┐
-│ 4. 线性加权融合 + 去重排序   │  融合分 = 0.7*向量分 + 0.3*关键词分
-│    topK=3 截断               │  去重按 documentId + chunk 位置指纹
-└─────────────┬───────────────┘
-              ▼
-┌─────────────────────────────┐
-│ 5. System Prompt 注入上下文 │  原文块前置【章节: 计费管理 > 账单 > 手动计费】
-│    + 章节路径提示            │  告知模型：只基于上下文回答，未命中说不知道
-└─────────────┬───────────────┘
-              ▼
-┌─────────────────────────────┐
-│ 6. LLM 生成最终回答          │  附 SourceDoc（原文片段 + 分数 + metadata）返回前端
-└─────────────────────────────┘
-```
-
-## 🤖 Agent 工作流
-
-```
-用户提问（"mv-003 近 30 天能耗，按月汇总"）
+闲聊短路？ ──是──→ 不带上下文直接回答
+   │否
+   ▼
+Query 改写？（多轮场景 + 改写已开启）
+   │是
+   ▼
+同义词扩展 + 中文 N-gram + headingPath 加权
    │
    ▼
-┌───────────────────────────────┐
-│ 1. HeuristicRouter 三层判定   │  ① 换话题黑名单 → 拒继承
-│    · 是否 FORCE_EXEC?         │  ② 领域实词（mv-/能耗/统计）→ 命中工具
-│    · 能否继承历史参数?        │  ③ 追问剥除残长≤2 → 纯代词追问
-└────┬────────────────────┬─────┘
-     │FORCE_EXEC          │其他
-     ▼                    ▼
-┌───────────────┐  ┌───────────────────────────────────────┐
-│ 直接调工具     │  │ 2. RAG 混合检索（异常降级不阻断）      │
-│ + LLM 总结     │  └──────────────┬────────────────────────┘
-└──────┬────────┘                 ▼
-       │              ┌───────────────────────────────────────┐
-       │              │ 3. Spring AI 2.0 ChatClient.tools()   │
-       │              │    · LLM 识别 tool_call JSON           │
-       │              │    · 反射调用 DeviceTools @Tool 方法   │
-       │              │    · 自动回填 ToolMessage              │
-       │              │    · 最多 5 轮直到最终纯文本回答        │
-       │              └──────────────┬────────────────────────┘
-       └───────────────┬──────────────┘
-                       ▼
-          最终回答 + 会话记忆持久化 + AgentTrace 完整落库
+双通道并行检索：向量检索(topK*5) + 关键词全文检索
+   │
+   ▼
+线性加权融合 + 阈值闸门 + 去重排序 → topK 截断
+   │
+   ▼
+全是保底块？ ──是──→ 低置信度提示词（不许强行总结）
+   │否
+   ▼
+正常 RAG 提示词 + System Prompt 注入上下文
+   │
+   ▼
+LLM 生成最终回答 + SourceDoc 返回前端
 ```
+
+### 2. Agent 自动 Tool Calling（`/ai/agent-chat`）
+
+```
+用户提问（"mv-003 近 30 天能耗按月汇总"）
+   │
+   ▼
+① Prompt Injection 检测？ ──是──→ 拦截返回固定拒绝语
+   │否
+   ▼
+② 闲聊短路？ ──是──→ handleSmallTalk()
+   │否
+   ▼
+③ 两段式路由决策：原问题 route → 改写/拼接后再 route
+   │
+   ├─ FORCE_EXEC 命中 → 直接调工具 → LLM 总结（跳过向量检索）
+   │
+   └─ 未命中
+        │
+        ├─ RAG 混合检索（向量层全低则保底块直接丢弃，避免注入无关文档）
+        │
+        ├─ RECOMMEND_LLM 命中：把工具建议附到提示词末尾，LLM 拍板
+        │
+        └─ Spring AI 2.0 ChatClient.tools(DeviceTools @Tool ×6)
+              · LLM 通过原生 tool_calls 通道识别
+              · TracingToolCallback 打 trace
+              · 最多 5 轮直到最终纯文本回答
+              · 兜底：模型把调用写成文本 JSON → TextToolCallParser 补执行
+   │
+   ▼
+统一 finish()：FINAL trace → 会话历史持久化 → 响应返回
+```
+
+### 3. ReAct 手动循环 + SSE 流式（`/ai/react-agent-chat-stream`）
+
+```
+用户提问
+   │
+   ├─ 闲聊短路：流式吐 final_delta
+   │
+   ├─ Prompt Injection 拦截：发 security_block → done
+   │
+   ▼
+Query 改写 + RAG 检索 → 构造 ReAct 系统提示词（内嵌 Tool Catalog + RAG 资料）
+   │
+   ▼
+for step 1..maxSteps:
+   │
+   ├─ step_start 事件（携带 step/maxSteps）
+   │
+   ├─ Thought 阶段：流式 thought_delta → 攒全量 → thought_end（携带 tool 名或 final 标识）
+   │
+   ├─ 给出 Final Answer？ ──是──→ final_start → final_delta（打字机效果）→ done
+   │
+   ├─ 识别到 Tool Call？
+   │     │
+   │     ├─ action_start（工具名+参数）→ 真正执行 → action_end（Observation + durationMs）
+   │     │
+   │     └─ Observation 塞回 messages，继续下一轮 step
+   │
+   └─ 未识别到工具调用也不是 Final Answer → 直接输出内容，结束循环
+   │
+   ▼
+done 事件（携带总步骤、耗时、sources、会话信息）
+```
+
+**SSE 事件序列一览**：
+
+| 事件名 | 触发时机 | 负载 |
+|-------|---------|------|
+| `rewrite` | Query 改写生效 | `{from, to, ms}` |
+| `rag_ready` | RAG 检索返回了结果 | `{count}` |
+| `step_start` | 每步推理开始 | `{step, maxSteps}` |
+| `thought_delta` | Thought 阶段流式 token | `{step, delta}` |
+| `thought_end` | Thought 阶段结束 | `{step, thought, isFinalAnswer, tool?, arguments?}` |
+| `action_start` | 工具执行前 | `{step, tool, arguments}` |
+| `action_end` | 工具执行完 | `{step, observation, durationMs, tool}` |
+| `final_start` | 最终回答打字机前 | `{length}` |
+| `final_delta` | 最终回答逐字/逐词 | `{delta}` |
+| `security_block` | Prompt Injection 被拦 | `{type, attackType, answer}` |
+| `error` | 任意环节出错 | `{step?, message}` |
+| `done` | **必定发出**，流结束标志 | `{answer, sources, mode, totalMs, steps, stepCount, sessionId, ...}` |
 
 ---
 
@@ -259,10 +340,12 @@ String finalContent = ChatClient.builder(primaryChatModel).build()
 # ============== 1. JDK 21 ==============
 java -version      # 必须 openjdk version "21.x"
 
-# ============== 2. 模型（二选一）==============
+# ============== 2. 模型（后端可混搭）==============
 # 【方案 A：完全离线 Ollama】
-ollama pull qwen2.5:1.5b          # 聊天模型（约 1GB，CPU 可跑）
-ollama pull nomic-embed-text      # 向量编码（必拉，默认值 mxbai-embed-large 不存在）
+ollama pull qwen2.5:1.5b          # 聊天模型（约 1GB，CPU 可跑，推荐用于 ReAct 模式）
+ollama pull nomic-embed-text      # 向量编码（必拉，框架默认值 mxbai-embed-large 不存在）
+# 或者用 bge-m3（docker-compose 默认配置）
+ollama pull bge-m3
 
 # 【方案 B：云端 DashScope】
 # 登录 https://bailian.console.aliyun.com/ 创建 API Key，下一步配置里注入即可
@@ -271,13 +354,13 @@ ollama pull nomic-embed-text      # 向量编码（必拉，默认值 mxbai-embe
 # 没装也能启动，Agent 调能耗工具时会报错但不影响知识库问答
 ```
 
-### 第二步：运行
+### 第二步：编译运行
 
 ```bash
 # 编译打包
 mvn clean package -DskipTests
 
-# ===== 启动（3 种方式选一种）=====
+# ===== 启动（N 种方式按需选）=====
 
 # 方式 1：纯离线 Ollama（默认，改 IP 就行）
 java -jar target/rag-assistant-1.0.0.jar \
@@ -297,34 +380,107 @@ java -jar target/rag-assistant-1.0.0.jar \
   --DASHSCOPE_API_KEY=sk-你的百炼Key \
   --OLLAMA_BASE_URL=http://你的OllamaIP:11434
 
+# 方式 4：纯知识库模式（禁用设备/能耗工具，只走 RAG）
+java -jar target/rag-assistant-1.0.0.jar \
+  --RAG_PURE_MODE=true \
+  --OLLAMA_BASE_URL=http://你的OllamaIP:11434
+
 # ===== 构建知识库 =====
 curl -X POST http://localhost:8900/ai/ingest
 # 返回：{"success":true,"count":42,"message":"知识库已重新构建，共 42 条向量"}
 ```
 
-### 第三步：验证
+### 第三步：Docker Compose 一键启动
 
-打开浏览器：
+```bash
+# Linux （Ollama 跑在宿主机，用 host 网络）
+docker compose up -d --build
+
+# Windows/Mac （Ollama 跑在宿主机，用 bridge 网络 + host.docker.internal）
+# 先把 docker-compose.yml 里的 network_mode: host 改成 network_mode: bridge，去掉注释 ports 段
+# 并把 OLLAMA_BASE_URL 改成 http://host.docker.internal:11434
+docker compose up -d --build
+
+# 看日志
+docker compose logs -f rag
+```
+
+### 第四步：验证页面一览
 
 | 页面 | 地址 | 说明 |
 |------|------|------|
 | **聊天首页** | http://localhost:8900/ | 单会话聊天，支持切换 Agent / 纯 RAG 模式 |
 | **知识库管理** | http://localhost:8900/docs.html | 文档上传、版本列表、发布/归档操作 |
-| **决策链路审计** | http://localhost:8900/agent-trace.html | Agent 每轮决策可视化、工具入参出参回放 |
+| **决策链路审计** | http://localhost:8900/agent-trace.html | Agent 每轮决策可视化、工具入参出参回放、影子路由统计 |
 | **H2 控制台** | http://localhost:8900/h2-console | JDBC `jdbc:h2:file:./data/ragdb`，用户名 `sa` 密码空 |
 | **健康检查** | http://localhost:8900/ai/health | JSON 形式返回能力清单 |
+| **Actuator** | http://localhost:8900/actuator/health | Spring Boot 健康检查 + Prometheus 指标 |
 
 ---
 
-## ⚙️ 核心配置详解（`application.yml`）
+## ⚙️ 核心配置详解
 
-### ① LLM 双后端切换（最常用）
+配置文件按职责拆分（`application.yml` 用 `spring.profiles.include` 聚合），加载顺序：
+`server → db → ai → rag → agent → storage → prompt → auth`
+
+### ① Agent：Tool Calling、启发式、影子路由（`application-agent.yml`）
+
+```yaml
+agent:
+  max-tool-calls: 5           # 原生 Tool Calling 最大轮次 / ReAct 最大 step 数
+  memory-size: 20             # 每个会话最多带入多少轮历史
+  session-ttl-minutes: 120    # 会话内存保留时长
+  max-sessions: 500           # 最多同时保留会话数
+  session-cleanup-interval-ms: 600000  # 定时清理周期（默认 10 分钟）
+
+  heuristic:
+    enabled: true
+    strategy: FORCE_EXEC      # FORCE_EXEC（最快，错判无纠正） / RECOMMEND_LLM（容错好）
+
+    shadow:                   # 影子路由：比对 LLM vs 正则，验证是否可替换正则路由
+      enabled: false          # 验证完请关掉，会多一次 LLM 调用
+      sample-every: 1         # 抽样：1=每次都比，10=10% 抽样
+      max-history-pairs: 3
+```
+
+### ② RAG：检索、切分、幻觉防护、Query 改写（`application-rag.yml`）
+
+```yaml
+rag:
+  top-k: 3
+  hybrid-search:
+    keyword-weight: 0.3
+    vector-weight:  0.7
+
+  # === 幻觉防护（现已全部接入代码）===
+  similarity-threshold: 0.40  # 低于此分数的向量直接丢弃（只卡向量余弦分，不卡混合分）
+  min-keep-chunks: 1          # 全低时保底留 N 块（Agent 链路会直接丢弃保底块）
+  pure-knowledge-mode: false  # true=禁用所有设备/能耗工具，只走 RAG
+
+  # === 文档切分（改完必须重新 ingest）===
+  chunking:
+    chunk-size-chars: 600     # 按字符，不是 token（中文 token 误差大）
+    overlap-chars: 90         # 约 15%，实际会收紧到句子边界
+    min-chunk-chars: 50       # 丢弃过短碎片
+    inject-heading-prefix: true  # chunk 正文前置【章节: A > B > C】
+    merge-barrier-level: 1    # 合并时不跨 h1（0=不限制）
+
+  # === Query 改写 ===
+  query-rewrite:
+    enabled: true
+    backend: dashscope        # 独立后端，推荐 qwen-turbo（非推理模型，0.47s）
+    model: qwen-turbo         # ❗千万别用 qwen3.7-flash 推理模型，会先思考撞 3s 超时
+    timeout-ms: 3000          # 超时静默回退，不阻断主流程
+    max-history-pairs: 3
+    max-length-ratio: 3.0     # 改写后超原长度 3 倍 → 判定跑飞，回退
+```
+
+### ③ LLM 双后端 + QueryRewrite 独立后端（`application-ai.yml`）
 
 ```yaml
 spring:
   ai:
-    # 聊天 / 向量编码后端独立选择：ollama（离线） / dashscope（阿里云百炼）/ openai（官方）
-    chat-backend:    ${CHAT_BACKEND:ollama}
+    chat-backend:    ${CHAT_BACKEND:ollama}       # ollama / dashscope / openai
     embedding-backend: ${EMBED_BACKEND:ollama}
 
     ollama:
@@ -333,66 +489,34 @@ spring:
         model: ${OLLAMA_CHAT_MODEL:qwen2.5:1.5b}
       embedding:
         options:
-          model: ${OLLAMA_EMBED_MODEL:nomic-embed-text}   # 不要改默认值 mxbai！
+          model: ${OLLAMA_EMBED_MODEL:nomic-embed-text}   # 框架默认 mxbai-embed-large 不存在，必改
 
-    openai:   # DashScope 用 OpenAI 兼容协议，走同一套自动配置
-      api-key:  ${DASHSCOPE_API_KEY:}                    # 强烈建议通过环境变量注入，不要硬写
+    openai:   # DashScope 走 OpenAI 兼容协议
+      api-key:  ${DASHSCOPE_API_KEY:}
       base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
       default-chat-options:
         model: ${DASHSCOPE_CHAT_MODEL:qwen3.7-flash}
-```
-
-### ② Query 改写独立后端（关键优化）
-
-```yaml
-rag:
-  query-rewrite:
-    enabled: true
-    # ⚠️ 改写是机械任务，千万别用 qwen3.7-flash 这种推理模型！会先思考 145 token → 撞 3s 超时
-    backend: ${REWRITE_BACKEND:dashscope}   # ollama / dashscope / openai
-    model:   ${REWRITE_MODEL:qwen-turbo}    # 实测：qwen-turbo 0.47s，qwen-plus 1.10s
-    timeout-ms: 3000                        # 超时静默回退原问题，不阻断主流程
-    max-history-pairs: 3                    # 只喂最近 3 轮，太多会带偏到旧话题
-    max-length-ratio: 3.0                   # 改写后超过原长度 3 倍 → 判定跑飞，回退
-```
-
-### ③ 文档切分（改完必须重新 `POST /ai/ingest` 全量重建）
-
-```yaml
-rag:
-  chunking:
-    chunk-size-chars: 600       # 按字符计量（token 对中文误差大）
-    overlap-chars: 90           # 15% 重叠；实际按句子边界收紧，不会半句截断
-    min-chunk-chars: 50         # 丢弃过短碎片（整篇仅一块时保留）
-    inject-heading-prefix: true # chunk 正文前置【章节: A > B > C】
-    merge-barrier-level: 1      # 合并时不跨 h1（h2/h3 小节会合并到 chunkSize 预算）
-```
-
-### ④ 混合检索权重
-
-```yaml
-rag:
-  top-k: 3
-  hybrid-search:
-    keyword-weight: 0.3   # 关键词命中分占比（title/headingPath 命中再额外加权）
-    vector-weight:  0.7   # 向量余弦相似度占比
 ```
 
 ---
 
 ## 📬 API 清单
 
-### ① 对话 & 知识库构建
+### ① 对话 & 知识库构建（`/ai/**`）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/ai/chat` | 纯 RAG 问答，不带 Agent |
-| `POST` | `/ai/agent-chat` | Agent 模式：启发式路由 + 工具调用 + 多轮记忆 + 混合检索 |
+| `POST` | `/ai/agent-chat` | Agent 模式：三路径编排 + 启发式路由 + 混合检索 + 多轮记忆 |
+| `POST` | `/ai/react-agent-chat` | ReAct 模式：手写 Thought-Action-Observation 循环，返回 JSON（含 step 详情） |
+| `POST` | `/ai/react-agent-chat-stream` | **ReAct SSE 流式**：step_start → thought_delta → action_start → final_delta → done |
+| `POST` | `/ai/compare-chat` | **对比模式**：同请求跑 Agent + ReAct 两条链路，返回 elapsed/steps/answer |
 | `POST` | `/ai/ingest` | **全量重建**：清空向量库 → 加载 `classpath:docs/**/*` 全部文档 |
+| `POST` | `/ai/ingestAll` | `/ai/ingest` 别名 |
 | `POST` | `/ai/ingest/{versionId}` | **单版本发布入库**：只删除该文档历史向量 → 切片入库（增量） |
 | `GET`  | `/ai/health` | 健康检查 + 能力清单 JSON |
 
-**`POST /ai/agent-chat` 请求体**：
+**`POST /ai/chat` / `/ai/agent-chat` 请求体**：
 ```json
 {
   "question": "mv-003 近 30 天能耗按月汇总",
@@ -418,19 +542,22 @@ rag:
 | `GET`  | `/{documentId}` | 最新版本详情 |
 | `GET`  | `/{documentId}/versions` | 完整版本历史 |
 
-### ③ Agent 决策链路审计
+### ③ Agent 决策链路审计 & 影子路由统计
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/api/agent/traces/session/{sessionId}` | 该会话完整决策链路（按轮次排序） |
 | `GET` | `/api/agent/traces/recent?limit=50` | 最近 N 条全局决策日志 |
 | `GET` | `/api/agent/traces/stats` | 调用量 / 成功率 / 平均耗时统计 |
+| `GET` | `/api/agent/traces/shadow-stats` | **影子路由统计**：7 类判定占比 / 一致率 / 分歧详情 |
 
 ---
 
 ## 🧩 内置工具清单
 
-工具定义在 `DeviceTools.java`，6 个方法全部通过 `@Tool` + `@ToolParam` 标准注解声明，Spring AI 2.0 `ChatClient.tools()` 自动注册、自动解析参数，**不需要手写 JSON 解析**。
+工具定义在 `DeviceTools.java`，6 个方法全部通过 `@Tool` + `@ToolParam` 标准注解声明：
+- 走原生 Tool Calling：Spring AI 2.0 `ChatClient.tools()` 自动注册
+- 走 ReAct 模式：`ToolCatalog.renderForPrompt()` 生成工具清单嵌入系统提示词
 
 | 工具名 | 参数 | 典型用户问句 |
 |--------|------|-------------|
@@ -448,11 +575,14 @@ rag:
 | 报错 / 现象 | 根因 | 解决 |
 |------------|------|------|
 | `不支持发行版本 21` | 命令行 JAVA_HOME 还是 JDK 17 | IDEA Terminal 里跑 mvn，或改系统环境变量 |
-| `Unable to determine Dialect without JDBC metadata` | Hibernate 7.2 不再自动猜方言 | application.yml 已内置 `hibernate.dialect: H2Dialect`，一般不会出；出了就加这行 |
-| `HTTP 404 model "mxbai-embed-large" not found` | 没显式配 embedding 模型，用了框架默认值 | `ollama pull nomic-embed-text`，配置 `spring.ai.ollama.embedding.options.model: nomic-embed-text` |
-| "mv-003呢" 查能耗，下一条"你是什么模型"还在调能耗 | 老版本 HeuristicRouter 误判 | 已修复：TOPIC_SWITCH_CHAT_PATTERN + 追问剥除残长判定；拉最新代码即可 |
-| 查询改写没生效，日志说"超时回退" | 改写后端用了 qwen3.7-flash 这种推理模型，先思考撞 3s 超时 | 改成 `rag.query-rewrite.model=qwen-turbo` 非推理模型，实测 0.47s 搞定 |
-| `.well-known/appspecific/com.chrome.devtools.json` WARN | Chrome 浏览器自动探测端点，跟项目无关 | 已按 WARN 单列处理，可忽略 |
+| `Unable to determine Dialect without JDBC metadata` | Hibernate 7.2 不再自动猜方言 | `application-db.yml` 已内置 `hibernate.dialect: H2Dialect` |
+| `HTTP 404 model "mxbai-embed-large" not found` | 框架默认 embedding 模型名 | `ollama pull nomic-embed-text` 或 `bge-m3` + 配 `spring.ai.ollama.embedding.options.model` |
+| 模型把 JSON 数组当最终答案返回（显示 `[}]` 三个字符） | 小模型把工具调用写成文本，没走原生通道 | AgentAppService 已有 `TextToolCallParser` 兜底；切 qwen3.7-flash 这类支持 function calling 的更佳 |
+| "mv-003呢" 查能耗，下一条"你是什么模型"还在调能耗 | 老版本 `HeuristicRouter` 误判 | 已修复：TOPIC_SWITCH_CHAT_PATTERN + 追问剥除残长判定 + 闲聊前置短路 |
+| Query 改写永远"超时回退" | 改写后端用了 qwen3.7-flash 这种推理模型，先思考撞 3s 超时 | 改成 `rag.query-rewrite.model=qwen-turbo` 非推理模型，实测 0.47s |
+| 改了 chunk-size/overlap 但检索效果没变 | 只改了配置没重新入库 | 跑一次 `POST /ai/ingest` 全量重建向量库 |
+| 打开影子路由后延迟翻倍 | 每次请求多了一次 LLM 调用（异步但耗资源） | 验证完关掉 `agent.heuristic.shadow.enabled=false`，或调大 `sample-every` 做抽样 |
+| `.well-known/appspecific/com.chrome.devtools.json` WARN | Chrome 自动探测端点 | 已按 WARN 单列处理，可忽略 |
 
 ---
 
@@ -462,10 +592,11 @@ rag:
 |------|--------|------|
 | 向量库升级 PGVector / Milvus / RedisSearch | `VectorStorePort` 新增实现 | 配置里替换 `@Primary` Bean 即可，Rag/Ingest 代码零改动 |
 | OCR 扫描件 / 图片入库 | `DocumentReaderPort` 扩展 OCR Adapter | Tika 基础已就绪，加 PaddleOCR / 阿里云 OCR 包装一层 |
-| 熔断限流缓存 | `common/aop/` + Resilience4j + Redis | LLM 调用、能耗查询都是高延迟外部 IO，适合加缓存 1min |
+| 熔断限流缓存 | 加 Resilience4j + Redis AOP | LLM 调用、能耗查询都是高延迟外部 IO，适合加缓存 1min |
 | MCP 协议对接外部系统工具 | `ToolRegistryPort` → 包 MCP ToolServer | DeviceTools 6 个方法直接暴露成 MCP Server 端点 |
-| Small-to-Big 父文档召回 | ChunkMetaKeys.PARENT_ID 已预埋 | RagAppService 返回 TopK 后批量查 parentId 对应全文，替换子 chunk |
-| Rerank 重排 | RagAppService 融合排序之后加一步 | 接 DashScope text-rerank-v1 或 bge-reranker，TopK*5 → Top3
+| Small-to-Big 父文档召回 | `ChunkMetaKeys.PARENT_ID` 已预埋 | RagAppService 返回 TopK 后批量查 parentId 对应全文，替换子 chunk |
+| Rerank 重排 | RagAppService 融合排序之后加一步 | 接 DashScope text-rerank-v1 或 bge-reranker，TopK*5 → Top3 |
+| BM25 / RRF 替换自定义关键词检索 | 升级到 Spring AI 2.0 M3+ 后替换 `RagAppService.buildRetriever()` | `pom.xml` 已引 `spring-ai-rag` 做预留，接口层零改动 |
 
 ---
 
