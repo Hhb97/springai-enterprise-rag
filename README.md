@@ -1,6 +1,6 @@
 # 智能运维 RAG + Agent 一体化平台
 
-> 基于 Spring Boot 4.0.7 + Spring AI 2.0.0 GA + JDK 21 的企业级知识库问答与智能 Agent 平台。采用 DDD 四层 + 六边形（Port-Adapter）架构，内置 **双模式 Agent**（原生 Tool Calling / 手动 ReAct 循环）、**混合检索**（向量 + 关键词线性加权融合）、**启发式路由 + 影子路由比对**、**Prompt Injection 防护**、**文档版本状态机**、**决策链路全审计** 等完整能力，同时适配本地 Ollama（离线）与阿里云百炼 DashScope（云端）双后端。
+> 基于 Spring Boot 4.0.7 + Spring AI 2.0.0 GA + JDK 21 的企业级知识库问答与智能 Agent 平台。采用 **DDD 四层 + 六边形（Port-Adapter）** 架构，内置 **双模式 Agent**（原生 Tool Calling / 手动 ReAct 循环）、**混合检索**（向量 + 关键词线性加权融合）、**启发式路由 + 影子路由比对**、**Prompt Injection 防护**、**文档版本状态机**、**决策链路全审计** 等完整能力，同时适配本地 Ollama（离线）与阿里云百炼 DashScope（云端）双后端。
 
 ---
 
@@ -8,15 +8,15 @@
 
 | 模块 | 能力说明 | 关键实现细节 |
 |------|---------|-------------|
-| **🧠 RAG 混合检索** | 向量检索 + 关键词检索线性加权融合 | 权重：向量 0.7 / 关键词 0.3；内置 10 组业务同义词扩展（账单↔计费等）；中文 N-gram 滑窗分词兜底；标题 headingPath 额外加权；相似度阈值卡向量分不卡融合分 |
+| **🧠 RAG 混合检索** | 向量检索 + 关键词检索线性加权融合 | 权重：向量 0.7 / 关键词 0.3；10 组业务同义词扩展（账单↔计费等）；中文 N-gram 滑窗分词；标题 headingPath 额外加权；**向量层全低于阈值时关键词层不许单独救回**；**检索为空直接返回不调 LLM** |
 | **✂️ 语义切分** | Markdown 结构感知 + 四级分隔符递归降级 | `OverlappingTextSplitter` 按段落→换行→句末→字符逐级切分；`MarkdownSectionParser` 保留完整标题路径 `A > B > C`；Chunk 正文可前置章节前缀注入 embedding |
-| **🔁 查询改写** | 多轮省略式问题还原（独立 LLM 后端） | 默认用 qwen-turbo 非推理模型（3s 超时守护）；改写结果仅用于检索，**不污染对话历史**；改写关闭时退回启发式历史拼接 |
+| **🔁 查询改写** | 多轮省略式问题还原（独立 LLM 后端） | 默认用 qwen-turbo 非推理模型（3s 超时守护）；改写结果**仅用于检索，不污染对话历史**；改写关闭时退回启发式历史拼接；**纯 RAG 链路现已写入会话历史，改写可拿到上下文** |
 | **🤖 原生 Tool Calling** | Spring AI 2.0 `ChatClient.tools()` 官方循环 | `@Tool` 注解自动注册 6 个设备/能耗工具；框架内部最多 5 轮循环；附带 **TextToolCallParser** 兜底识别模型把调用写成文本 JSON 的场景 |
 | **🧠 手动 ReAct 循环** | Thought → Action → Observation 全流程 | `ReActAgentAppService` 手写 ReAct 循环；每一步严格 JSON 格式解析；支持 **SSE 流式推送**（step_start → thought_delta → action_start → final_delta → done） |
 | **🔀 对比模式** | Agent vs ReAct 同请求双跑 | `POST /ai/compare-chat` 一份请求同时跑两条链路，返回 elapsed / steps / answer，用于效果评估 |
-| **⚡ 启发式路由** | FORCE_EXEC / RECOMMEND_LLM 双策略 | 列出设备、近 N 天能耗等高频纯工具场景，FORCE_EXEC 直接跳检索跳 LLM；RECOMMEND_LLM 把建议交给模型拍板 |
-| **👥 影子路由** | 正则 vs LLM 异步灰盒比对 | 每次请求异步多问一次「LLM 会选哪个工具」，7 种判定结果写入 AgentTrace，为替换正则路由积累真实数据 |
-| **🛡️ 安全防护** | Prompt Injection 拦截 + 三级幻觉防线 | 三类攻击模式：忽略指令 / 角色篡改 / 规则绕过；幻觉防护：相似度阈值 + 保底块标记 + 低置信度提示词降级 |
+| **⚡ 启发式路由** | FORCE_EXEC / RECOMMEND_LLM 双策略 | 列出设备、近 N 天能耗等高频纯工具场景，FORCE_EXEC 直接跳检索跳 LLM；**领域实词与追问标记分离判定，防止"如何创建用户呢"被误判为同话题** |
+| **👥 影子路由** | 正则 vs LLM 异步灰盒比对 | 每次请求异步多问一次「LLM 会选哪个工具」，7 种判定结果写入 AgentTrace；**复用 QueryRewrite 轻量后端**，验证完可一键关闭或抽样 |
+| **🛡️ 安全防护** | Prompt Injection 拦截 + 四级幻觉防线 | 三类攻击模式：忽略指令 / 角色篡改 / 规则绕过；幻觉防护：空检索直接拒绝 + 相似度阈值 + 保底块标记 + 低置信度提示词降级 |
 | **📚 文档版本管理** | DRAFT → ACTIVE → ARCHIVED 状态机 | **发布时才入库向量**；增量更新只清该文档旧向量，不动全库；10 个 REST 接口全覆盖 |
 | **🔍 决策链路审计** | 每轮 Agent 决策全落库 | LLM 决策、工具入参/出参、耗时、异常；按 Session 回放；内置可视化页面 `agent-trace.html` |
 | **📊 可观测性** | 全链路 TraceId | `TraceIdFilter` MDC 贯通；日志 `[traceId=xxx]` 对齐；Actuator + Prometheus 就绪 |
@@ -36,7 +36,7 @@
 | 时序数据 | InfluxDB 1.8 SQL 聚合查询 | 通过 `TimeSeriesDbPort` 适配 |
 | 前端 | 原生 HTML + JS（零构建） | 聊天 / 知识库管理 / 决策审计 三页内置 |
 
-> ⚠️ **关于 BM25 / RRF**：Spring AI 2.0.0 GA 已将 `BM25Retriever` + `EnsembleRetriever` 从 GA 包移除（目前仅在 M 系列里程碑中），本项目采用自定义的**线性加权融合检索**替代（五层防线设计见下文），`pom.xml` 已引 `spring-ai-rag` 做预留，等后续版本加回 BM25/RRF 后，只需替换 `RagAppService.java:buildRetriever()` 即可，接口层零改动。
+> ⚠️ **关于 BM25 / RRF**：Spring AI 2.0.0 GA 已将 `BM25Retriever` + `EnsembleRetriever` 从 GA 包移除（目前仅在 M 系列里程碑中），本项目采用自定义的**线性加权融合检索**替代（六层防线设计见下文）。`pom.xml` 已引 `spring-ai-rag` 做预留，等后续版本加回 BM25/RRF 后，只需替换 `RagAppService.java:hybridSearch()` 内部实现即可，接口层零改动。
 
 ---
 
@@ -49,7 +49,7 @@ src/main/java/com/example/ragassitant/
 │   └── service/
 │       ├── AgentAppService             # 三路径编排：闲聊短路 → FORCE_EXEC → 原生 Tool Calling
 │       ├── ReActAgentAppService        # 手动 ReAct 循环：普通 + SSE 流式 双入口
-│       ├── RagAppService               # 混合检索（线性加权 + 幻觉防护三级闸门）
+│       ├── RagAppService               # 混合检索（线性加权 + 幻觉防护四级闸门）
 │       ├── IngestAppService            # 文件分派 → 切分 → 向量入库
 │       ├── DocumentAppService          # 文档版本状态机 + 发布时向量清理
 │       ├── QueryRewriteService         # 多轮省略问句改写 + 超时降级
@@ -121,7 +121,7 @@ src/main/java/com/example/ragassitant/
   ├─② Prompt Injection 检测（忽略指令/角色篡改/规则绕过）
   │    → 拦截，返回固定拒绝语
   │
-  ├─③ 启发式命中 FORCE_EXEC 策略
+  ├─③ 启发式命中 FORCE_EXEC 策略 + 非纯知识库模式
   │    → handleForcedTool()：直接调工具 + LLM 总结，跳过向量检索
   │
   └─④ 其他所有情况
@@ -138,9 +138,24 @@ src/main/java/com/example/ragassitant/
 
 这是从真实线上事故抠出来的防线：用户第一句「列出所有设备」（正确回答），第二句只说「你好」→ 走 RAG 检索必然召回电能质量 FAQ → FAQ 以「知识库参考内容」名义拼进提示词 → 模型回「我已经阅读了知识库中的内容…」并把 FAQ 整段总结。用户看到的是一次没人问过的知识库问答。
 
-所以闲聊必须在 **改写 / 路由 / 检索** 三者之前一起短路。
+所以闲聊必须在 **改写 / 路由 / 检索** 三者之前一起短路。纯 RAG 链路同样会被「你好」击中，现已同步前置短路。
 
-### 4. 影子路由：为架构升级积累决策依据
+### 4. 同话题判定：领域实词 vs 追问标记必须分离
+
+```
+【踩过的坑】上一轮查 mv-005 能耗，下一轮问「如何创建用户呢？」
+   ↓ 改造前：把"呢""如何"也算作同话题信号
+   ↓ 结果：拼接历史继承了 mv-005，知识库问题被劫持成能耗查询，还跳过了向量检索
+
+【修复方案】HeuristicRouter 判定顺序：
+  1. 命中明确换话题/闲聊 → false
+  2. 命中领域实词（设备/能耗/按月/近30天等）→ true  ← 唯一正向确认信号
+  3. 只命中追问标记（呢/吗/如何/那个呢）：
+     - 剥掉标记后残长 ≤2 字（如"那个呢"→""）→ 是纯代词追问，true
+     - 否则（如"如何创建用户呢"→"创建用户"）→ 是新问题，false
+```
+
+### 5. 影子路由：为架构升级积累决策依据
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -160,6 +175,8 @@ src/main/java/com/example/ragassitant/
 │              ⚠️ LLM_ONLY       LLM 认为该调 正则漏了           │
 │              ✅ BOTH_NONE      两边都认为不需要调              │
 │              ❓ UNKNOWN        LLM 输出解析失败                │
+│                                                             │
+│  【后端选择】复用 QueryRewrite 的轻量 LLM Bean：快、便宜、非推理 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -179,27 +196,29 @@ src/main/java/com/example/ragassitant/
 
 → **同义词 / 近义词盲区**，是中文 RAG 纯向量方案必踩的坑。
 
-### 2. 本项目的 RAG 检索五层防线
+### 2. 本项目的 RAG 检索六层防线
 
 | # | 防线 | 代码位置 | 解决的问题 |
 |---|------|---------|-----------|
 | ① | **同义词硬规则扩展** | `RagAppService.java:SYNONYM_MAP` + `expandChineseKeywords()` | 账单↔计费 / 报表↔报告 / 登录↔登入 / 用户↔账号，固定 10 对高频业务词，零成本零误判 |
 | ② | **中文 N-gram 分词兜底** | `RagAppService.java:expandChineseKeywords()` 滑窗 | 长词拆成 2~4 字滑窗："手动账单流程" → "手动 动账 账单 单流 流程 手动账..."，总有一个子串命中 |
 | ③ | **双通道线性加权融合** | `RagAppService.java:linearWeightHybridSearch()` 融合公式 | `score = 0.7*向量分 + 0.3*关键词分`；向量负责模糊语义，关键词负责精确字面 |
-| ④ | **标题 / 章节路径加权** | `RagAppService.java:keywordSearchWithScore()` | 命中 title +0.5，命中 headingPath +0.4；标题是作者标注的主题，语义最强 |
-| ⑤ | **Chunk 正文前缀注入章节** | `SpringAiDocumentReader.java` | 每行前置 `【章节:计费管理>账单>手动计费】`，embedding 编码时把标题词混进向量 |
+| ④ | **向量层全低，关键词层禁用** | `RagAppService.java:linearWeightHybridSearch()` 开头判定 | 向量认定全库不相关时，关键词层不许单独把巧合命中救回（中文单字巧合几乎等于噪声） |
+| ⑤ | **标题 / 章节路径加权** | `RagAppService.java:keywordSearchWithScore()` | 命中 title +0.5，命中 headingPath +0.4；标题是作者标注的主题，语义最强 |
+| ⑥ | **Chunk 正文前缀注入章节** | `SpringAiDocumentReader.java` | 每行前置 `【章节:计费管理>账单>手动计费】`，embedding 编码时把标题词混进向量 |
 
 > **为什么不接标准 BM25 / RRF？**  
 > Spring AI 2.0 GA 已移除 BM25Retriever + EnsembleRetriever，硬引会导致 BOM 版本漂移。  
-> 上面 5 层防线在中文领域 ≈ 带业务权重的 RRF，效果不输给标准 BM25 融合，且零额外依赖，**部署不会炸**。
+> 上面 6 层防线在中文领域 ≈ 带业务权重的 RRF，效果不输给标准 BM25 融合，且零额外依赖，**部署不会炸**。
 
-### 3. 幻觉防护三级闸门（现已全部接入代码）
+### 3. 幻觉防护四级闸门（现已全部接入代码）
 
 | 层级 | 机制 | 代码位置 |
 |------|------|---------|
-| ① **阈值闸门** | `VectorStoreDocumentRetriever` 显式设置 `similarityThreshold`（默认 0.40），低于阈值直接丢弃 | `RagAppService.java:buildRetriever()` |
-| ② **保底块标记** | 即使都低于阈值，`min-keep-chunks` 也会留 N 块，但打上 `belowThreshold=true` 标签；**向量层全低时关键词层不许单独救回** | `RagAppService.java:applyThreshold()` + `linearWeightHybridSearch()` |
-| ③ **提示词降级** | 纯 RAG 链路：全是保底块 → 切换到「不许强行总结」的低置信度提示词；Agent 链路：保底块直接丢弃（还有工具和常识能力，宁可空上下文也不要无关文档） | `RagAppService.java:askWithOptions()` + `AgentAppService.java:retrieveContext()` |
+| ① **空检索直接拒绝** | 检索结果为 0 块时，**直接返回确定性答案**「知识库中没有找到相关信息」，**不发起 LLM 调用**，从根上断掉「空上下文脑补」 | `RagAppService.java:askWithOptions()` 第 218 行 |
+| ② **阈值闸门** | `VectorStoreDocumentRetriever` 显式设置 `similarityThreshold`（YAML 默认 0.40），低于阈值直接丢弃；**设阈值后无命中不再回退无阈值接口** | `RagAppService.java:buildRetriever()` + `vectorSearch()` |
+| ③ **保底块标记** | 即使都低于阈值，`min-keep-chunks` 也会留 N 块，但打上 `belowThreshold=true` 标签 | `RagAppService.java:applyThreshold()` |
+| ④ **提示词降级** | 纯 RAG 链路：全是保底块 → 切换到「不许强行总结」的低置信度提示词；Agent 链路：保底块直接丢弃（还有工具和常识能力，宁可空上下文也不要无关文档） | `RagAppService.java:askWithOptions()` + `AgentAppService.java:retrieveContext()` |
 
 ### 4. 文档切分的"不切断语义"原则
 
@@ -224,10 +243,10 @@ L0 段落（\n\n\r\n\r\n） → L1 换行（\n） → L2 中文句末（。！�
 用户提问（"手动账单流程？"）
    │
    ▼
-闲聊短路？ ──是──→ 不带上下文直接回答
+闲聊短路？ ──是──→ 不带上下文直接回答（fallback 兜底）
    │否
    ▼
-Query 改写？（多轮场景 + 改写已开启）
+Query 改写？（多轮场景 + 改写已开启）※ 纯 RAG 链路现已写入会话历史
    │是
    ▼
 同义词扩展 + 中文 N-gram + headingPath 加权
@@ -236,8 +255,14 @@ Query 改写？（多轮场景 + 改写已开启）
 双通道并行检索：向量检索(topK*5) + 关键词全文检索
    │
    ▼
+向量层全低于阈值？ ──是──→ 跳过关键词层救回 → 结果可能为空
+   │否
+   ▼
 线性加权融合 + 阈值闸门 + 去重排序 → topK 截断
    │
+   ▼
+检索为空？ ──是──→ 直接返回「无相关信息」，**不调用 LLM**
+   │否
    ▼
 全是保底块？ ──是──→ 低置信度提示词（不许强行总结）
    │否
@@ -246,6 +271,9 @@ Query 改写？（多轮场景 + 改写已开启）
    │
    ▼
 LLM 生成最终回答 + SourceDoc 返回前端
+   │
+   ▼
+写会话历史（纯 RAG 链路现已修复，改写下一轮可拿到上下文）
 ```
 
 ### 2. Agent 自动 Tool Calling（`/ai/agent-chat`）
@@ -262,7 +290,7 @@ LLM 生成最终回答 + SourceDoc 返回前端
    ▼
 ③ 两段式路由决策：原问题 route → 改写/拼接后再 route
    │
-   ├─ FORCE_EXEC 命中 → 直接调工具 → LLM 总结（跳过向量检索）
+   ├─ FORCE_EXEC 命中 + 非纯知识库模式 → 直接调工具 → LLM 总结（跳过向量检索）
    │
    └─ 未命中
         │
@@ -413,8 +441,7 @@ docker compose logs -f rag
 | **知识库管理** | http://localhost:8900/docs.html | 文档上传、版本列表、发布/归档操作 |
 | **决策链路审计** | http://localhost:8900/agent-trace.html | Agent 每轮决策可视化、工具入参出参回放、影子路由统计 |
 | **H2 控制台** | http://localhost:8900/h2-console | JDBC `jdbc:h2:file:./data/ragdb`，用户名 `sa` 密码空 |
-| **健康检查** | http://localhost:8900/ai/health | JSON 形式返回能力清单 |
-| **Actuator** | http://localhost:8900/actuator/health | Spring Boot 健康检查 + Prometheus 指标 |
+| **Actuator 健康检查** | http://localhost:8900/actuator/health | Spring Boot 健康检查 + Prometheus 指标 |
 
 ---
 
@@ -438,7 +465,7 @@ agent:
     strategy: FORCE_EXEC      # FORCE_EXEC（最快，错判无纠正） / RECOMMEND_LLM（容错好）
 
     shadow:                   # 影子路由：比对 LLM vs 正则，验证是否可替换正则路由
-      enabled: false          # 验证完请关掉，会多一次 LLM 调用
+      enabled: false          # 【代码默认 true，YAML 默认 false】验证完请关掉，会多一次 LLM 调用
       sample-every: 1         # 抽样：1=每次都比，10=10% 抽样
       max-history-pairs: 3
 ```
@@ -453,9 +480,11 @@ rag:
     vector-weight:  0.7
 
   # === 幻觉防护（现已全部接入代码）===
-  similarity-threshold: 0.40  # 低于此分数的向量直接丢弃（只卡向量余弦分，不卡混合分）
-  min-keep-chunks: 1          # 全低时保底留 N 块（Agent 链路会直接丢弃保底块）
-  pure-knowledge-mode: false  # true=禁用所有设备/能耗工具，只走 RAG
+  # 【注意】代码构造函数里默认 similarity-threshold=0.0 / min-keep-chunks=0
+  #        但下方 YAML 覆盖值是 0.40 / 1，实际运行以 YAML / 环境变量为准
+  similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.40}  # 只卡向量余弦分，不卡混合分
+  min-keep-chunks: ${RAG_MIN_KEEP:1}                      # 全低时保底留 N 块（设为 0 则不保底）
+  pure-knowledge-mode: ${RAG_PURE_MODE:false}             # true=禁用所有设备/能耗工具，只走 RAG
 
   # === 文档切分（改完必须重新 ingest）===
   chunking:
@@ -506,7 +535,7 @@ spring:
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/ai/chat` | 纯 RAG 问答，不带 Agent |
+| `POST` | `/ai/chat` | 纯 RAG 问答，不带 Agent；**空检索直接返回不调 LLM** |
 | `POST` | `/ai/agent-chat` | Agent 模式：三路径编排 + 启发式路由 + 混合检索 + 多轮记忆 |
 | `POST` | `/ai/react-agent-chat` | ReAct 模式：手写 Thought-Action-Observation 循环，返回 JSON（含 step 详情） |
 | `POST` | `/ai/react-agent-chat-stream` | **ReAct SSE 流式**：step_start → thought_delta → action_start → final_delta → done |
@@ -514,18 +543,17 @@ spring:
 | `POST` | `/ai/ingest` | **全量重建**：清空向量库 → 加载 `classpath:docs/**/*` 全部文档 |
 | `POST` | `/ai/ingestAll` | `/ai/ingest` 别名 |
 | `POST` | `/ai/ingest/{versionId}` | **单版本发布入库**：只删除该文档历史向量 → 切片入库（增量） |
-| `GET`  | `/ai/health` | 健康检查 + 能力清单 JSON |
 
-**`POST /ai/chat` / `/ai/agent-chat` 请求体**：
+**`POST /ai/chat` / `/ai/agent-chat` / `/ai/react-agent-chat` 共用请求体**：
 ```json
 {
   "question": "mv-003 近 30 天能耗按月汇总",
   "sessionId": "session-001",
   "enableHybridSearch": true,
-  "topK": 3,
-  "useRag": true
+  "topK": 3
 }
 ```
+> ⚠️ 注意：`useRag` 参数在 ChatController 中是写死 `true` 的，DTO 里没有该字段。
 
 ### ② 文档 & 版本管理（`/api/docs/**`）
 
@@ -582,6 +610,7 @@ spring:
 | Query 改写永远"超时回退" | 改写后端用了 qwen3.7-flash 这种推理模型，先思考撞 3s 超时 | 改成 `rag.query-rewrite.model=qwen-turbo` 非推理模型，实测 0.47s |
 | 改了 chunk-size/overlap 但检索效果没变 | 只改了配置没重新入库 | 跑一次 `POST /ai/ingest` 全量重建向量库 |
 | 打开影子路由后延迟翻倍 | 每次请求多了一次 LLM 调用（异步但耗资源） | 验证完关掉 `agent.heuristic.shadow.enabled=false`，或调大 `sample-every` 做抽样 |
+| 纯 RAG 模式下多轮改写永远拿不到上下文 | 改造前 RAG 链路漏写会话历史 | 现已修复：`RagAppService.finish()` 会写会话历史 |
 | `.well-known/appspecific/com.chrome.devtools.json` WARN | Chrome 自动探测端点 | 已按 WARN 单列处理，可忽略 |
 
 ---
@@ -596,7 +625,7 @@ spring:
 | MCP 协议对接外部系统工具 | `ToolRegistryPort` → 包 MCP ToolServer | DeviceTools 6 个方法直接暴露成 MCP Server 端点 |
 | Small-to-Big 父文档召回 | `ChunkMetaKeys.PARENT_ID` 已预埋 | RagAppService 返回 TopK 后批量查 parentId 对应全文，替换子 chunk |
 | Rerank 重排 | RagAppService 融合排序之后加一步 | 接 DashScope text-rerank-v1 或 bge-reranker，TopK*5 → Top3 |
-| BM25 / RRF 替换自定义关键词检索 | 升级到 Spring AI 2.0 M3+ 后替换 `RagAppService.buildRetriever()` | `pom.xml` 已引 `spring-ai-rag` 做预留，接口层零改动 |
+| BM25 / RRF 替换自定义关键词检索 | 升级到 Spring AI 2.0 M3+ 后替换 `RagAppService.hybridSearch()` | `pom.xml` 已引 `spring-ai-rag` 做预留，接口层零改动 |
 
 ---
 
