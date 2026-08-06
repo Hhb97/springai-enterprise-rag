@@ -4,6 +4,7 @@ import com.example.ragassitant.common.trace.TraceIdFilter;
 import com.example.ragassitant.domain.model.DocumentChunk;
 import com.example.ragassitant.domain.model.ToolCall;
 import com.example.ragassitant.domain.service.PromptBuilder;
+import com.example.ragassitant.domain.service.PromptInjectionDetector;
 import com.example.ragassitant.domain.service.TextToolCallParser;
 import com.example.ragassitant.domain.spi.ConversationStorePort;
 import com.example.ragassitant.domain.spi.LlmPort;
