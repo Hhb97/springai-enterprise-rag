@@ -996,7 +996,6 @@
             try {
                 const r = await fetch(`/api/agent/traces/recent?limit=${limit}`).then(r => r.json());
                 allTraces = (r && r.data) ? r.data : [];
-
                 let errCnt = 0, hitCnt = 0, hitTotal = 0;
                 sessions = new Map();
                 for (const t of allTraces) {
@@ -1013,6 +1012,11 @@
                 const total = allTraces.length;
                 document.getElementById('statErrRate').textContent = total ? ((errCnt/total)*100).toFixed(1)+'%' : '0%';
                 document.getElementById('statHitRate').textContent = hitTotal ? ((hitCnt/hitTotal)*100).toFixed(1)+'%' : '—';
+
+                // 对每个会话的步骤按时间戳排序
+                sessions.forEach((traces, sid) => {
+                    traces.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+                });
 
                 renderSessionList();
             } catch (e) {
@@ -1039,7 +1043,7 @@
             sessionIds.forEach(sid => {
                 const traces = sessions.get(sid);
                 const last = traces[traces.length - 1];
-                const stages = [...new Set(traces.map(t => t.stage))];
+                const stages = traces.map(t => t.stage);
                 const hasErr = traces.some(t => t.status === 'ERROR');
                 const totalDur = traces.reduce((sum, t) => sum + (t.durationMs || 0), 0);
 
@@ -1105,6 +1109,14 @@
                                     <span>🎯</span>
                                     <span>启发式路由: <b>${t.heuristicRoute || '—'}</b></span>
                                 </div>
+                            ` : ''}
+                            ${t.llmInput ? `
+                                <div class="section-label">📥 LLM 输入</div>
+                                <div class="code-block">${escapeHtml(formatJsonSafe(t.llmInput))}</div>
+                            ` : ''}
+                            ${t.llmOutput ? `
+                                <div class="section-label">📤 LLM 输出</div>
+                                <div class="code-block">${escapeHtml(formatJsonSafe(t.llmOutput))}</div>
                             ` : ''}
                             ${t.content ? `
                                 <div class="section-label">内容</div>

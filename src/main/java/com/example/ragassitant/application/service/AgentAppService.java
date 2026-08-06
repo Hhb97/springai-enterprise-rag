@@ -5,6 +5,7 @@ import com.example.ragassitant.domain.model.DocumentChunk;
 import com.example.ragassitant.domain.model.ToolCall;
 import com.example.ragassitant.domain.service.HeuristicRouter;
 import com.example.ragassitant.domain.service.PromptBuilder;
+import com.example.ragassitant.domain.service.PromptInjectionDetector;
 import com.example.ragassitant.domain.service.TextToolCallParser;
 import com.example.ragassitant.domain.spi.AgentTraceStorePort;
 import com.example.ragassitant.domain.spi.ConversationStorePort;
@@ -61,6 +62,7 @@ public class AgentAppService {
     private final QueryRewriteService queryRewriteService;
     private final ShadowToolRouter shadowToolRouter;
     private final TextToolCallParser textToolCallParser;
+    private final PromptInjectionDetector injectionDetector;
     /**
      * 工具目录。注册给 LLM 时用 {@link ToolCatalog#tracingToolCallbacks()} 而不是裸的 @Tool Bean ——
      * 那层装饰器会在「LLM 真正通过原生 tool_calls 通道调用工具」时打日志并写 trace，
@@ -87,6 +89,7 @@ public class AgentAppService {
                            QueryRewriteService queryRewriteService,
                            ShadowToolRouter shadowToolRouter,
                            TextToolCallParser textToolCallParser,
+                           PromptInjectionDetector injectionDetector,
                            ToolCatalog toolCatalog,
                            AgentProperties props,
                            @Value("${rag.pure-knowledge-mode:false}") boolean pureKnowledgeMode) {
@@ -100,6 +103,7 @@ public class AgentAppService {
         this.queryRewriteService = queryRewriteService;
         this.shadowToolRouter = shadowToolRouter;
         this.textToolCallParser = textToolCallParser;
+        this.injectionDetector = injectionDetector;
         this.toolCatalog = toolCatalog;
         this.props = props;
         this.pureKnowledgeMode = pureKnowledgeMode;
@@ -136,6 +140,14 @@ public class AgentAppService {
         //   检索：问候和任何文档的相似度都很低，召回结果只会污染上下文
         if (HeuristicRouter.isSmallTalk(question)) {
             return handleSmallTalk(question, sessionId);
+        }
+
+        // 🛡️ Prompt Injection 安全检测
+        if (injectionDetector.isPromptInjection(question)) {
+            String attackType = injectionDetector.getAttackType(question);
+            log.warn("🛡️ 拦截 Prompt Injection 攻击: sessionId={}, attackType={}", sessionId, attackType);
+            String rejectionMsg = "抱歉，我检测到您的请求中包含试图绕过系统安全策略的指令。作为智能运维助手，我必须遵守预设的角色和职责范围，无法执行此类操作。如果您有设备查询、能耗分析或运维知识库相关的问题，欢迎随时向我提问！";
+            return buildRejectionResponse(rejectionMsg, "prompt_injection", attackType, sessionId);
         }
 
         Routing routing = resolveRouting(question, history, sessionId);
@@ -497,6 +509,20 @@ public class AgentAppService {
             conversationStorePort.saveAssistant(sessionId, answer);
         }
         return new ChatResponse(answer, sources);
+    }
+
+    /** 构建安全拦截拒绝响应。 */
+    private ChatResponse buildRejectionResponse(String answer, String type, String attackType, String sessionId) {
+        traceStore.recordDecision(sessionId, 1, "SECURITY_BLOCK",
+                null, null, null,
+                answer, answer,
+                false, type,
+                0L, "BLOCKED", attackType);
+        if (sessionId != null && !sessionId.isBlank()) {
+            conversationStorePort.saveUser(sessionId, answer);
+            conversationStorePort.saveAssistant(sessionId, answer);
+        }
+        return new ChatResponse(answer, List.of());
     }
 
     private String toJson(Object obj) {

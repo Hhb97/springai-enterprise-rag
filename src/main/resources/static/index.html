@@ -808,6 +808,11 @@
             scroll-padding-bottom: 40px;
         }
 
+        /* 流式更新时禁用平滑滚动，避免抖动 */
+        .chat-container.stream-updating {
+            scroll-behavior: auto;
+        }
+
         .welcome {
             max-width: 840px;
             margin: 0 auto;
@@ -3174,7 +3179,11 @@
             // 使用 requestAnimationFrame 确保在下一帧更新，避免布局抖动
             requestAnimationFrame(() => {
                 // 保存滚动位置
-                const scrollTop = chatContentEl.scrollTop;
+                const scrollTop = chatContainerEl.scrollTop;
+                const scrollHeight = chatContainerEl.scrollHeight;
+                
+                // 临时禁用平滑滚动，避免抖动
+                chatContainerEl.classList.add('stream-updating');
                 
                 bubble.innerHTML = html;
 
@@ -3193,7 +3202,12 @@
                 }
                 
                 // 恢复滚动位置，避免跳动
-                chatContentEl.scrollTop = scrollTop;
+                chatContainerEl.scrollTop = scrollTop;
+                
+                // 恢复平滑滚动
+                requestAnimationFrame(() => {
+                    chatContainerEl.classList.remove('stream-updating');
+                });
             });
         }
     }
@@ -3209,8 +3223,17 @@
             // 接近底部时滚一下（和原来逻辑一致）
             try {
                 const nearBottom =
-                    chatContentEl.scrollHeight - chatContentEl.scrollTop - chatContentEl.clientHeight < 260;
-                if (nearBottom) scrollToBottom();
+                    chatContainerEl.scrollHeight - chatContainerEl.scrollTop - chatContainerEl.clientHeight < 260;
+                if (nearBottom) {
+                    // 使用 requestAnimationFrame 确保在 DOM 更新后再滚动
+                    requestAnimationFrame(() => {
+                        chatContainerEl.classList.add('stream-updating');
+                        chatContainerEl.scrollTop = chatContainerEl.scrollHeight;
+                        requestAnimationFrame(() => {
+                            chatContainerEl.classList.remove('stream-updating');
+                        });
+                    });
+                }
             } catch (_) {
             }
         }, STREAM_THROTTLE_MS);
@@ -3387,10 +3410,18 @@
                     // 先把当前数据刷到 DOM（省得节流里旧数据覆盖新的）
                     patchStreamBubble(botIdx);
                 }
+                // 临时禁用平滑滚动
+                chatContainerEl.classList.add('stream-updating');
                 renderChat();
                 const nearBottom =
-                    chatContentEl.scrollHeight - chatContentEl.scrollTop - chatContentEl.clientHeight < 300;
-                if (nearBottom) scrollToBottom();
+                    chatContainerEl.scrollHeight - chatContainerEl.scrollTop - chatContainerEl.clientHeight < 300;
+                if (nearBottom) {
+                    chatContainerEl.scrollTop = chatContainerEl.scrollHeight;
+                }
+                // 恢复平滑滚动
+                requestAnimationFrame(() => {
+                    chatContainerEl.classList.remove('stream-updating');
+                });
             } else {
                 // 高频 token：只 schedule 节流 patch（不会触发整个聊天容器重建，绝对不闪）
                 scheduleStreamPatch(botIdx);
@@ -3625,9 +3656,12 @@
 
     function scrollToBottom() {
         requestAnimationFrame(() => {
-            chatContainerEl.scrollTo({
-                top: chatContainerEl.scrollHeight,
-                behavior: 'smooth'
+            // 临时禁用平滑滚动
+            chatContainerEl.classList.add('stream-updating');
+            chatContainerEl.scrollTop = chatContainerEl.scrollHeight;
+            // 恢复平滑滚动
+            requestAnimationFrame(() => {
+                chatContainerEl.classList.remove('stream-updating');
             });
         });
     }

@@ -50,6 +50,7 @@ public class ReActAgentAppService {
     private final ToolCatalog toolCatalog;
     private final TextToolCallParser textToolCallParser;
     private final AgentProperties props;
+    private final PromptInjectionDetector injectionDetector;
 
     public ReActAgentAppService(LlmPort llmPort,
                                  ConversationStorePort conversationStorePort,
@@ -59,7 +60,8 @@ public class ReActAgentAppService {
                                  QueryRewriteService queryRewriteService,
                                  ToolCatalog toolCatalog,
                                  TextToolCallParser textToolCallParser,
-                                 AgentProperties props) {
+                                 AgentProperties props,
+                                 PromptInjectionDetector injectionDetector) {
         this.llmPort = llmPort;
         this.conversationStorePort = conversationStorePort;
         this.toolRegistry = toolRegistry;
@@ -69,6 +71,7 @@ public class ReActAgentAppService {
         this.toolCatalog = toolCatalog;
         this.textToolCallParser = textToolCallParser;
         this.props = props;
+        this.injectionDetector = injectionDetector;
         log.info("🧠 ReActAgentAppService 初始化完成（手动 ReAct 循环，maxSteps={}）", props.getMaxToolCalls());
     }
 
@@ -153,6 +156,22 @@ public class ReActAgentAppService {
 
         if (isSmallTalk(question)) {
             handleSmallTalkStream(emitter, finished, question, sessionId);
+            return;
+        }
+        if (finished.get()) return;
+
+        // ️ Prompt Injection 安全检测
+        if (injectionDetector.isPromptInjection(question)) {
+            String attackType = injectionDetector.getAttackType(question);
+            log.warn("🛡️ 拦截 Prompt Injection 攻击: sessionId={}, attackType={}", sessionId, attackType);
+            String rejectionMsg = "抱歉，我检测到您的请求中包含试图绕过系统安全策略的指令。作为智能运维助手，我必须遵守预设的角色和职责范围，无法执行此类操作。如果您有设备查询、能耗分析或运维知识库相关的问题，欢迎随时向我提问！";
+            safeEmit(emitter, finished, "security_block", Map.of(
+                    "type", "prompt_injection",
+                    "attackType", attackType,
+                    "answer", rejectionMsg
+            ));
+            safeEmit(emitter, finished, "final_answer", Map.of("answer", rejectionMsg));
+            safeEmit(emitter, finished, "done", Map.of("durationMs", System.currentTimeMillis() - totalStart));
             return;
         }
         if (finished.get()) return;
