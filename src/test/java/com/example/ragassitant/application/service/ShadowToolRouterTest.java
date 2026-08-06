@@ -12,6 +12,7 @@ import com.example.ragassitant.infrastructure.agent.DeviceTools;
 import com.example.ragassitant.infrastructure.agent.ToolCatalog;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Flux;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -60,8 +61,18 @@ class ShadowToolRouterTest {
         }
 
         @Override
+        public Flux<String> chatStreamWithRawMessages(List<MessageDTO> messages) {
+            return null;
+        }
+
+        @Override
         public String chatWithAutoToolCalling(List<MessageDTO> m, int max, List<Object> tools) {
             throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public String chat(String systemPrompt, String userQuestion) {
+            return LlmPort.super.chat(systemPrompt, userQuestion);
         }
     }
 
