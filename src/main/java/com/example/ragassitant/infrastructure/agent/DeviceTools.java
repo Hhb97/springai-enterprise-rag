@@ -11,12 +11,10 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import java.util.*;
 
 @Component
 public class DeviceTools {
@@ -26,6 +24,8 @@ public class DeviceTools {
 
     private final TimeSeriesDbPort timeSeriesDbPort;
     private final EnergyAggregator energyAggregator;
+
+    private final Random random = new Random();
 
     public DeviceTools(TimeSeriesDbPort timeSeriesDbPort, EnergyAggregator energyAggregator) {
         this.timeSeriesDbPort = timeSeriesDbPort;
@@ -267,6 +267,40 @@ public class DeviceTools {
               .append(" |\n");
         }
         return sb.toString();
+    }
+
+
+    @Tool(name = "getCurrentTime", description = "获取当前系统时间，支持指定时区格式")
+    public ZonedDateTime getCurrentTime(
+            @ToolParam(description = "时区，如 Asia/Shanghai、UTC，默认为系统时区", required = false) String timezone
+    ) {
+        if (timezone != null && !timezone.isEmpty()) {
+            return ZonedDateTime.now(ZoneId.of(timezone));
+        }
+        return ZonedDateTime.now();
+    }
+
+    @Tool(name = "get_weather",
+            description = "获取指定城市的当前天气信息，包括温度、天气状况、湿度、风速等")
+    public String getWeather(
+            @ToolParam(description = "城市名称，例如：'北京', '上海'", required = true) String city) {
+
+        // 生成随机天气数据
+        String[] weatherConditions = {"晴朗", "多云", "阴天", "小雨", "中雨", "阵雨", "雷阵雨", "小雪", "中雪", "雾", "霾"};
+        String condition = weatherConditions[random.nextInt(weatherConditions.length)];
+
+        int temperature = random.nextInt(35) - 5;  // -5 ~ 30°C
+        int humidity = random.nextInt(70) + 20;    // 20% ~ 90%
+        int windSpeed = random.nextInt(40) + 5;    // 5 ~ 45 km/h
+
+        // 当前时间
+        ZonedDateTime now = ZonedDateTime.now();
+        String timeStr = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH"));
+
+        return String.format(
+                "【%s】%s 天气：%s，温度：%d°C，湿度：%d%%，风速：%d km/h",
+                timeStr, city, condition, temperature, humidity, windSpeed
+        );
     }
 
     private static String gLabel(String g) {
