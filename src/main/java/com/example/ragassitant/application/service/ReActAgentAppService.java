@@ -6,6 +6,7 @@ import com.example.ragassitant.domain.model.ToolCall;
 import com.example.ragassitant.domain.service.PromptBuilder;
 import com.example.ragassitant.domain.service.PromptInjectionDetector;
 import com.example.ragassitant.domain.service.TextToolCallParser;
+import com.example.ragassitant.domain.spi.AgentTraceStorePort;
 import com.example.ragassitant.domain.spi.ConversationStorePort;
 import com.example.ragassitant.domain.spi.LlmPort;
 import com.example.ragassitant.domain.spi.LlmPort.MessageDTO;
@@ -52,6 +53,7 @@ public class ReActAgentAppService {
     private final TextToolCallParser textToolCallParser;
     private final AgentProperties props;
     private final PromptInjectionDetector injectionDetector;
+    private final AgentTraceStorePort traceStore;
 
     public ReActAgentAppService(LlmPort llmPort,
                                  ConversationStorePort conversationStorePort,
@@ -62,7 +64,8 @@ public class ReActAgentAppService {
                                  ToolCatalog toolCatalog,
                                  TextToolCallParser textToolCallParser,
                                  AgentProperties props,
-                                 PromptInjectionDetector injectionDetector) {
+                                 PromptInjectionDetector injectionDetector,
+                                 AgentTraceStorePort traceStore) {
         this.llmPort = llmPort;
         this.conversationStorePort = conversationStorePort;
         this.toolRegistry = toolRegistry;
@@ -73,7 +76,8 @@ public class ReActAgentAppService {
         this.textToolCallParser = textToolCallParser;
         this.props = props;
         this.injectionDetector = injectionDetector;
-        log.info("🧠 ReActAgentAppService 初始化完成（手动 ReAct 循环，maxSteps={}）", props.getMaxToolCalls());
+        this.traceStore = traceStore;
+        log.info("🧠 ReActAgentAppService 初始化完成（手动 ReAct 循环，maxSteps={}，链路追踪已开启）", props.getMaxToolCalls());
     }
 
     public Map<String, Object> chat(String question, String sessionId,
@@ -166,6 +170,13 @@ public class ReActAgentAppService {
             String attackType = injectionDetector.getAttackType(question);
             log.warn("🛡️ 拦截 Prompt Injection 攻击: sessionId={}, attackType={}", sessionId, attackType);
             String rejectionMsg = "抱歉，我检测到您的请求中包含试图绕过系统安全策略的指令。作为智能运维助手，我必须遵守预设的角色和职责范围，无法执行此类操作。如果您有设备查询、能耗分析或运维知识库相关的问题，欢迎随时向我提问！";
+            traceStore.recordDecision(sessionId, 1, "SECURITY_BLOCK",
+                    null, null, null,
+                    rejectionMsg, rejectionMsg,
+                    false, "prompt_injection",
+                    0L, "BLOCKED", attackType);
+            conversationStorePort.saveUser(sessionId, question);
+            conversationStorePort.saveAssistant(sessionId, rejectionMsg);
             safeEmit(emitter, finished, "security_block", Map.of(
                     "type", "prompt_injection",
                     "attackType", attackType,
@@ -232,6 +243,13 @@ public class ReActAgentAppService {
         List<Map<String, Object>> stepTraces = new ArrayList<>();
         String finalAnswer = "";
 
+        traceStore.recordDecision(sessionId, 1, "REACT_LOOP_START",
+                null, null, null,
+                question,
+                "maxSteps=" + maxSteps + ", ragChunks=" + docs.size() + ", stream=true",
+                false, "REACT_MANUAL_LOOP",
+                null, "OK", null);
+
         for (int step = 1; step <= maxSteps && !finished.get(); step++) {
             long stepStart = System.currentTimeMillis();
             safeEmit(emitter, finished, "step_start", Map.of("step", step, "maxSteps", maxSteps));
@@ -260,12 +278,24 @@ public class ReActAgentAppService {
                 if (!ok || streamErr.get() != null) {
                     String msg = streamErr.get() != null ? streamErr.get().getMessage() : "LLM 流式调用超时";
                     stepTraces.add(buildStepTrace(step, "LLM 调用出错", null, null, msg, System.currentTimeMillis() - stepStart));
+                    traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                            null, null, null,
+                            "Thought step " + step,
+                            "Thought: LLM 调用出错",
+                            false, "REACT_STEP_ERROR",
+                            System.currentTimeMillis() - stepStart, "ERROR", msg);
                     safeEmit(emitter, finished, "error", Map.of("step", step, "message", msg));
                     finalAnswer = "推理步骤 " + step + " 出错: " + msg;
                     break;
                 }
             } catch (Exception e) {
                 stepTraces.add(buildStepTrace(step, "LLM 调用出错", null, null, e.getMessage(), System.currentTimeMillis() - stepStart));
+                traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                        null, null, null,
+                        "Thought step " + step,
+                        "Thought: LLM 调用异常",
+                        false, "REACT_STEP_ERROR",
+                        System.currentTimeMillis() - stepStart, "ERROR", e.getMessage());
                 safeEmit(emitter, finished, "error", Map.of("step", step, "message", e.getMessage()));
                 finalAnswer = "推理步骤 " + step + " 出错: " + e.getMessage();
                 break;
@@ -274,6 +304,12 @@ public class ReActAgentAppService {
             String llmResponse = buf.toString();
             if (llmResponse.isBlank()) {
                 stepTraces.add(buildStepTrace(step, "模型返回空响应", null, null, "空", System.currentTimeMillis() - stepStart));
+                traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                        null, null, null,
+                        "Thought step " + step,
+                        "Thought: 模型返回空响应",
+                        false, "REACT_STEP_EMPTY",
+                        System.currentTimeMillis() - stepStart, "ERROR", "模型返回空");
                 finalAnswer = "模型返回空响应，请重试。";
                 break;
             }
@@ -300,6 +336,12 @@ public class ReActAgentAppService {
             // ===== Final Answer：直接打字机逐字符流 final_delta =====
             if (decision.isFinalAnswer()) {
                 stepTraces.add(buildStepTrace(step, decision.thought(), null, decision.answer(), null, stepMs));
+                traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                        null, null, null,
+                        truncate(decision.thought(), 500),
+                        "FinalAnswer 长度=" + (decision.answer() == null ? 0 : decision.answer().length()),
+                        false, "REACT_STEP_FINAL",
+                        stepMs, "OK", null);
                 finalAnswer = decision.answer() == null ? "" : decision.answer();
                 streamFinalAnswer(emitter, finished, finalAnswer);
                 break;
@@ -307,6 +349,12 @@ public class ReActAgentAppService {
 
             if (decision.toolCall() == null) {
                 stepTraces.add(buildStepTrace(step, decision.thought(), null, null, "未识别到工具调用或最终答案", stepMs));
+                traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                        null, null, null,
+                        truncate(decision.thought(), 500),
+                        "未识别到工具调用或最终答案，提前结束",
+                        false, "REACT_STEP_NO_TOOL",
+                        stepMs, "WARN", "parse_fail_tool_or_answer");
                 finalAnswer = (decision.answer() != null && !decision.answer().isBlank())
                         ? decision.answer()
                         : (decision.thought() != null ? decision.thought() : cleanupAnswer(llmResponse));
@@ -322,11 +370,15 @@ public class ReActAgentAppService {
 
             long actStart = System.currentTimeMillis();
             String observation;
+            boolean toolOk = true;
+            String toolErr = null;
             try {
                 observation = toolRegistry.invoke(tc);
             } catch (Exception e) {
                 log.error("🧠 ReActStream step {} tool exec failed: {}", step, e.getMessage());
                 observation = "工具执行失败: " + e.getMessage();
+                toolOk = false;
+                toolErr = e.getMessage();
             }
             long actMs = System.currentTimeMillis() - actStart;
 
@@ -335,6 +387,12 @@ public class ReActAgentAppService {
             if (finished.get()) return;
 
             stepTraces.add(buildStepTrace(step, decision.thought(), tc, observation, null, stepMs));
+            traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                    tc.name, tc.arguments, observation,
+                    truncate(decision.thought(), 500),
+                    "Tool 执行长度=" + (observation == null ? 0 : observation.length()),
+                    false, "REACT_STEP_TOOL_" + (toolOk ? "OK" : "ERR"),
+                    stepMs, toolOk ? "OK" : "ERROR", toolErr);
 
             // ===== Observation 塞回 messages，继续下一轮 =====
             currentMessages.add(new MessageDTO(Role.ASSISTANT, llmResponse));
@@ -346,6 +404,12 @@ public class ReActAgentAppService {
 
         if (finalAnswer == null || finalAnswer.isBlank()) {
             finalAnswer = "已达到最大推理步数 (" + maxSteps + ")，未能得出最终答案。请尝试更具体的问题，或提供更多参数。";
+            traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                    null, null, null,
+                    "maxSteps=" + maxSteps,
+                    "已达最大步数，提前终止",
+                    false, "REACT_MAX_STEPS_REACHED",
+                    System.currentTimeMillis() - totalStart, "WARN", "max_steps_reached");
             streamFinalAnswer(emitter, finished, finalAnswer);
         }
         if (finished.get()) return;
@@ -354,6 +418,12 @@ public class ReActAgentAppService {
         conversationStorePort.saveAssistant(sessionId, finalAnswer);
 
         long totalMs = System.currentTimeMillis() - totalStart;
+        traceStore.recordDecision(sessionId, 1, "FINAL",
+                null, null, null,
+                question, finalAnswer,
+                false, "REACT_MANUAL_LOOP",
+                totalMs, "OK", null);
+
         Map<String, Object> done = new LinkedHashMap<>();
         done.put("answer", finalAnswer);
         done.put("sources", sources);
@@ -424,9 +494,14 @@ public class ReActAgentAppService {
                     String answer = (reply == null || reply.isBlank()) ? SMALL_TALK_FALLBACK : cleanupAnswer(reply);
                     if (answer.isBlank()) answer = SMALL_TALK_FALLBACK;
                     fullReply.set(answer);
+                    long ms = System.currentTimeMillis() - start;
+                    traceStore.recordDecision(sessionId, 1, "SMALL_TALK",
+                            null, null, null,
+                            question, answer,
+                            false, "SMALL_TALK_SHORT_CIRCUIT",
+                            ms, "OK", null);
                     conversationStorePort.saveUser(sessionId, question);
                     conversationStorePort.saveAssistant(sessionId, answer);
-                    long ms = System.currentTimeMillis() - start;
                     safeEmit(emitter, finished, "done", Map.of(
                             "answer", answer, "sources", List.of(), "mode", "react",
                             "totalMs", ms, "steps", List.of(), "stepCount", 0,
@@ -435,10 +510,15 @@ public class ReActAgentAppService {
                 })
                 .doOnError(e -> {
                     String answer = SMALL_TALK_FALLBACK;
+                    long ms = System.currentTimeMillis() - start;
+                    traceStore.recordDecision(sessionId, 1, "SMALL_TALK",
+                            null, null, null,
+                            question, answer,
+                            false, "SMALL_TALK_SHORT_CIRCUIT",
+                            ms, "ERROR", e.getMessage());
                     conversationStorePort.saveUser(sessionId, question);
                     conversationStorePort.saveAssistant(sessionId, answer);
                     safeEmitError(emitter, finished, e.getMessage() == null ? "闲聊回复失败" : e.getMessage());
-                    long ms = System.currentTimeMillis() - start;
                     safeEmit(emitter, finished, "done", Map.of(
                             "answer", answer, "sources", List.of(), "mode", "react",
                             "totalMs", ms, "steps", List.of(), "stepCount", 0,
@@ -464,6 +544,28 @@ public class ReActAgentAppService {
 
         if (isSmallTalk(question)) {
             return handleSmallTalk(question, sessionId);
+        }
+
+        // 🛡️ Prompt Injection 安全检测（非流式之前漏掉了，现在补上）
+        if (injectionDetector.isPromptInjection(question)) {
+            String attackType = injectionDetector.getAttackType(question);
+            log.warn("🛡️ 拦截 Prompt Injection 攻击: sessionId={}, attackType={}", sessionId, attackType);
+            String rejectionMsg = "抱歉，我检测到您的请求中包含试图绕过系统安全策略的指令。作为智能运维助手，我必须遵守预设的角色和职责范围，无法执行此类操作。如果您有设备查询、能耗分析或运维知识库相关的问题，欢迎随时向我提问！";
+            traceStore.recordDecision(sessionId, 1, "SECURITY_BLOCK",
+                    null, null, null,
+                    rejectionMsg, rejectionMsg,
+                    false, "prompt_injection",
+                    0L, "BLOCKED", attackType);
+            conversationStorePort.saveUser(sessionId, question);
+            conversationStorePort.saveAssistant(sessionId, rejectionMsg);
+            Map<String, Object> r = new HashMap<>();
+            r.put("answer", rejectionMsg);
+            r.put("sources", List.of());
+            r.put("mode", "react");
+            r.put("totalMs", System.currentTimeMillis() - totalStart);
+            r.put("blocked", true);
+            r.put("blockType", "prompt_injection");
+            return r;
         }
 
         String retrievalQuery = question;
@@ -514,6 +616,13 @@ public class ReActAgentAppService {
         messages.add(new MessageDTO(Role.USER, question));
 
         int maxSteps = props.getMaxToolCalls();
+        traceStore.recordDecision(sessionId, 1, "REACT_LOOP_START",
+                null, null, null,
+                question,
+                "maxSteps=" + maxSteps + ", ragChunks=" + docs.size() + ", stream=false",
+                false, "REACT_MANUAL_LOOP",
+                null, "OK", null);
+
         ReActResult result = runReActLoop(messages, sessionId, maxSteps);
 
         String answer = result.finalAnswer();
@@ -523,6 +632,11 @@ public class ReActAgentAppService {
         conversationStorePort.saveAssistant(sessionId, answer);
 
         long totalMs = System.currentTimeMillis() - totalStart;
+        traceStore.recordDecision(sessionId, 1, "FINAL",
+                null, null, null,
+                question, answer,
+                false, "REACT_MANUAL_LOOP",
+                totalMs, "OK", null);
 
         Map<String, Object> response = new HashMap<>();
         response.put("answer", answer);
@@ -553,6 +667,11 @@ public class ReActAgentAppService {
         String answer = (reply == null || reply.isBlank()) ? SMALL_TALK_FALLBACK : cleanupAnswer(reply);
         if (answer.isBlank()) answer = SMALL_TALK_FALLBACK;
 
+        traceStore.recordDecision(sessionId, 1, "SMALL_TALK",
+                null, null, null,
+                question, answer,
+                false, "SMALL_TALK_SHORT_CIRCUIT",
+                elapsed, "OK", null);
         conversationStorePort.saveUser(sessionId, question);
         conversationStorePort.saveAssistant(sessionId, answer);
 
@@ -582,12 +701,24 @@ public class ReActAgentAppService {
             } catch (Exception e) {
                 log.error("🧠 ReAct step {} failed: {}", step, e.getMessage());
                 stepTraces.add(buildStepTrace(step, "LLM 调用出错", null, null, e.getMessage(), System.currentTimeMillis() - stepStart));
+                traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                        null, null, null,
+                        "Thought step " + step,
+                        "Thought: LLM 调用异常",
+                        false, "REACT_STEP_ERROR",
+                        System.currentTimeMillis() - stepStart, "ERROR", e.getMessage());
                 finalAnswer = "推理步骤 " + step + " 出错: " + e.getMessage();
                 break;
             }
 
             if (llmResponse == null || llmResponse.isBlank()) {
                 stepTraces.add(buildStepTrace(step, "模型返回空响应", null, null, "模型返回空", System.currentTimeMillis() - stepStart));
+                traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                        null, null, null,
+                        "Thought step " + step,
+                        "Thought: 模型返回空响应",
+                        false, "REACT_STEP_EMPTY",
+                        System.currentTimeMillis() - stepStart, "ERROR", "模型返回空");
                 finalAnswer = "模型返回空响应，请重试。";
                 break;
             }
@@ -602,12 +733,24 @@ public class ReActAgentAppService {
 
             if (decision.isFinalAnswer()) {
                 stepTraces.add(buildStepTrace(step, decision.thought(), null, decision.answer(), null, stepMs));
+                traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                        null, null, null,
+                        truncate(decision.thought(), 500),
+                        "FinalAnswer 长度=" + (decision.answer() == null ? 0 : decision.answer().length()),
+                        false, "REACT_STEP_FINAL",
+                        stepMs, "OK", null);
                 finalAnswer = decision.answer();
                 break;
             }
 
             if (decision.toolCall() == null) {
                 stepTraces.add(buildStepTrace(step, decision.thought(), null, null, "未识别到工具调用或最终答案", stepMs));
+                traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                        null, null, null,
+                        truncate(decision.thought(), 500),
+                        "未识别到工具调用或最终答案，提前结束",
+                        false, "REACT_STEP_NO_TOOL",
+                        stepMs, "WARN", "parse_fail_tool_or_answer");
                 finalAnswer = (decision.answer() != null && !decision.answer().isBlank())
                         ? decision.answer()
                         : (decision.thought() != null ? decision.thought() : cleanupAnswer(llmResponse));
@@ -615,14 +758,24 @@ public class ReActAgentAppService {
             }
 
             String observation;
+            boolean toolOk = true;
+            String toolErr = null;
             try {
                 observation = toolRegistry.invoke(decision.toolCall());
             } catch (Exception e) {
                 log.error("🧠 ReAct step {} tool execution failed: {}", step, e.getMessage());
                 observation = "工具执行失败: " + e.getMessage();
+                toolOk = false;
+                toolErr = e.getMessage();
             }
 
             stepTraces.add(buildStepTrace(step, decision.thought(), decision.toolCall(), observation, null, stepMs));
+            traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                    decision.toolCall().name, decision.toolCall().arguments, observation,
+                    truncate(decision.thought(), 500),
+                    "Tool 执行长度=" + (observation == null ? 0 : observation.length()),
+                    false, "REACT_STEP_TOOL_" + (toolOk ? "OK" : "ERR"),
+                    stepMs, toolOk ? "OK" : "ERROR", toolErr);
 
             currentMessages.add(new MessageDTO(Role.ASSISTANT, llmResponse));
             String observationPrompt = "【Observation 工具执行结果】\n```\n" + observation + "\n```\n\n";
@@ -638,6 +791,12 @@ public class ReActAgentAppService {
 
         if (finalAnswer == null || finalAnswer.isBlank()) {
             finalAnswer = "已达到最大推理步数 (" + maxSteps + ")，未能得出最终答案。请尝试更具体的问题，或提供更多参数。";
+            traceStore.recordDecision(sessionId, 1, "REACT_STEP",
+                    null, null, null,
+                    "maxSteps=" + maxSteps,
+                    "已达最大步数，提前终止",
+                    false, "REACT_MAX_STEPS_REACHED",
+                    null, "WARN", "max_steps_reached");
         }
 
         return new ReActResult(finalAnswer, stepTraces);

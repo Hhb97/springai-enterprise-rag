@@ -1,6 +1,7 @@
 package com.example.ragassitant.interfaces.rest;
 
 import com.example.ragassitant.application.service.DocumentAppService;
+import com.example.ragassitant.application.service.IngestAppService;
 import com.example.ragassitant.infrastructure.persistence.jpa.DocumentVersionJpaEntity;
 import com.example.ragassitant.infrastructure.persistence.jpa.DocumentVersionJpaEntity.DocumentStatus;
 import org.springframework.http.ResponseEntity;
@@ -15,9 +16,12 @@ import java.util.Map;
 public class DocumentController {
 
     private final DocumentAppService documentAppService;
+    private final IngestAppService ingestAppService;
 
-    public DocumentController(DocumentAppService documentAppService) {
+    public DocumentController(DocumentAppService documentAppService,
+                               IngestAppService ingestAppService) {
         this.documentAppService = documentAppService;
+        this.ingestAppService = ingestAppService;
     }
 
     @PostMapping("/upload")
@@ -75,6 +79,53 @@ public class DocumentController {
             return ResponseEntity.ok(archived);
         } catch (RuntimeException e) {
             return ResponseEntity.notFound().build();
+        }
+    }
+
+    /**
+     * 单文档加入知识库（前端 docs.html 「加入知识库」按钮）
+     * 对指定已发布/归档版本做重新切分 + 向量化，重新替换掉该文档的旧向量。
+     */
+    @PostMapping("/versions/{versionId}/add-to-kb")
+    public ResponseEntity<?> addToKnowledgeBase(@PathVariable Long versionId) {
+        try {
+            int chunks = ingestAppService.ingestDocument(versionId);
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "message", "已入库 " + chunks + " 个向量块",
+                    "chunkCount", chunks
+            ));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "success", false,
+                    "message", e.getMessage()
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "success", false,
+                    "message", "入库失败: " + e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * 重建整个知识库（前端 docs.html 「重建知识库」按钮）
+     * 清空向量库 → 重新切分 classpath:docs 和所有 ACTIVE 版本文档 → 入库 → 刷新检索器。
+     */
+    @PostMapping("/ingest-all")
+    public ResponseEntity<?> rebuildKnowledgeBase() {
+        try {
+            int chunks = ingestAppService.ingestAll();
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "message", "知识库已重建，共 " + chunks + " 个向量块",
+                    "chunkCount", chunks
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "success", false,
+                    "message", "重建失败: " + e.getMessage()
+            ));
         }
     }
 
