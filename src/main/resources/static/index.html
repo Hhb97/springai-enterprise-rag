@@ -2827,6 +2827,13 @@
     function switchChat(id) {
         if (isGenerating) return;
         currentChatId = id;
+        const chat = getCurrentChat();
+        if (chat) {
+            const mode = chat.mode
+                || (chat.messages && [...chat.messages].reverse().find(m => m.mode)?.mode)
+                || 'agent';
+            if (mode !== currentMode) setMode(mode);
+        }
         renderChatList();
         renderChat();
     }
@@ -3272,6 +3279,7 @@
             chat.title = text.length > 26 ? text.slice(0, 26) + '…' : text;
         }
         chat.messages.push({role: 'user', content: text});
+        chat.mode = currentMode;
         chat.updatedAt = Date.now();
         inputEl.value = '';
         autosizeTextarea();
