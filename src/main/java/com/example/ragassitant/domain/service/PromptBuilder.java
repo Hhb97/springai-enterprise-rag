@@ -288,4 +288,90 @@ public class PromptBuilder {
         sb.append("现在开始！收到用户消息后，严格按上述 JSON 格式回复第一步。\n");
         return sb.toString();
     }
+
+    /**
+     * Plan-then-Execute 的 Planner 提示词：一次生成<b>完整计划</b>，不执行、不作答。
+     *
+     * <p>关键设计（ReWOO 思路）：
+     * <ul>
+     *   <li>Planner 盲于 Observation —— 用 {@code $N} 占位符引用将来某个步骤的产物，
+     *       不需要真的看到中间结果就能写出依赖链（第 1 步查清单 → 第 2 步用 $1 取 SN）；</li>
+     *   <li>无依赖的步骤并列排布，Executor 会并行跑，这是对比 ReAct 省延迟的来源；</li>
+     *   <li>不需要任何工具时输出 {@code "steps":[]}，Solver 会直接基于 RAG 上下文回答。</li>
+     * </ul>
+     *
+     * @param toolCatalog 可用工具清单（含参数 schema，来自 {@code ToolCatalog.renderForPrompt()}）
+     * @param historyText 对话历史（仅用于指代消解，不参与执行）
+     */
+    public String buildPlanSystemPrompt(String toolCatalog, String historyText) {
+        String role = agentRole != null ? agentRole : "你是智能运维助手";
+        return """
+                # 角色
+                %s
+
+                你是「计划生成器」。你只负责把用户问题拆解成一个可执行的工具调用计划，**不要执行任何工具，不要回答用户问题**。
+
+                # 可用工具 Tool Catalog
+                %s
+
+                # 对话历史（只用于理解省略/指代，不要把它当成当前任务）
+                %s
+
+                # 输出格式
+                严格输出一个 JSON 对象（不要输出任何多余文字、不要代码块围栏）：
+                {
+                  "reasoning": "<一句话说明你为何这样规划>",
+                  "steps": [
+                    {"step": 1, "tool": "工具名", "arguments": {...}, "depends_on": []},
+                    {"step": 2, "tool": "工具名", "arguments": {"sn": "$1"}, "depends_on": [1]}
+                  ]
+                }
+
+                # 规划规则
+                1. 每个 step 只调用一个工具，工具名和参数名必须来自上方 Tool Catalog；
+                2. 参数引用前一步结果时用占位符 "$N"（N 为步骤号，仅限依赖中声明的步骤）；
+                3. 无依赖关系的步骤并列排布（并行执行），有依赖的写清 depends_on；
+                4. 参数只能来自用户问题、对话历史或 $N 占位符，禁止编造 SN 号/日期/能耗数值；
+                5. 拿不准 SN 号 → 第一步先 list_devices 找到，再在下一步用 $N 引用；
+                6. 步骤数尽量少，最多 %d 步；不需要任何工具时输出 "steps": []；
+                7. 只做规划，禁止给出最终回答 —— 最终回答由 Solver 基于执行结果生成。
+
+                现在开始！收到用户问题后，严格输出上述 JSON 计划。
+                """.formatted(role, toolCatalog == null ? "（无）" : toolCatalog,
+                historyText == null ? "（无）" : historyText, 5);
+    }
+
+    /**
+     * Plan-then-Execute 的 Solver 提示词：基于工具执行结果 + RAG 资料合成最终回答。
+     *
+     * <p>与 ReAct 的观察回灌相比，这里<b>只调一次</b> LLM，所有 Observation 一次性给全，
+     * 不逐轮把中间结果塞回上下文 —— 这是 Plan-then-Execute 省 token 的核心。
+     *
+     * @param ragContext RAG 检索到的资料（可能为空，为空时明确要求不编造）
+     * @param executionResults 各计划步骤的执行结果（Markdown 文本）
+     */
+    public String buildPlanSolverSystemPrompt(String ragContext, String executionResults) {
+        return """
+                # 角色
+                你是智能运维助手。基于下面的「工具执行结果」和「知识库参考资料」回答用户的问题。
+
+                # 工具执行结果（Plan 各步骤的返回）
+                ---
+                %s
+                ---
+
+                # 知识库参考资料
+                ---
+                %s
+                ---
+
+                # 回答规则
+                1. 设备/能耗数据必须来自「工具执行结果」，文档内容必须来自「知识库参考资料」，禁止编造；
+                2. 没有任何可依据的资料时，明确回答"抱歉，我未能获取到足够信息来回答该问题"，不要脑补；
+                3. 用中文自然语言回答，能耗与设备数据整理成规范的 Markdown 表格，单位标注清楚；
+                4. 若某步骤执行失败，如实说明并给出可行的替代建议。
+                """.formatted(
+                executionResults == null || executionResults.isBlank() ? "（无步骤执行，仅凭知识库回答）" : executionResults,
+                ragContext == null || ragContext.isBlank() ? "（无检索资料）" : ragContext);
+    }
 }

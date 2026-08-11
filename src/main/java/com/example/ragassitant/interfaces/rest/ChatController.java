@@ -2,6 +2,7 @@ package com.example.ragassitant.interfaces.rest;
 
 import com.example.ragassitant.application.service.AgentAppService;
 import com.example.ragassitant.application.service.IngestAppService;
+import com.example.ragassitant.application.service.PlanThenExecuteAppService;
 import com.example.ragassitant.application.service.RagAppService;
 import com.example.ragassitant.application.service.ReActAgentAppService;
 import com.example.ragassitant.interfaces.dto.request.ChatRequestDTO;
@@ -23,15 +24,18 @@ public class ChatController {
     private final IngestAppService ingestAppService;
     private final AgentAppService agentAppService;
     private final ReActAgentAppService reActAgentAppService;
+    private final PlanThenExecuteAppService planThenExecuteAppService;
 
     public ChatController(RagAppService ragAppService,
                           IngestAppService ingestAppService,
                           AgentAppService agentAppService,
-                          ReActAgentAppService reActAgentAppService) {
+                          ReActAgentAppService reActAgentAppService,
+                          PlanThenExecuteAppService planThenExecuteAppService) {
         this.ragAppService = ragAppService;
         this.ingestAppService = ingestAppService;
         this.agentAppService = agentAppService;
         this.reActAgentAppService = reActAgentAppService;
+        this.planThenExecuteAppService = planThenExecuteAppService;
     }
 
     @PostMapping("/chat")
@@ -143,6 +147,32 @@ public class ChatController {
     }
 
     /**
+     * Plan-then-Execute 模式：Planner 一次规划 → Executor 并行执行 → Solver 一次综合。
+     * 无依赖的工具步骤并行执行，Observation 一次性交给 Solver，比 ReAct 更省 token 和延迟。
+     */
+    @PostMapping("/plan-chat")
+    public ResponseEntity<Map<String, Object>> planChat(@RequestBody ChatRequestDTO request) {
+        try {
+            String sessionId = request.getSessionId();
+            if (sessionId == null || sessionId.isBlank()) {
+                sessionId = "plan-session-" + System.currentTimeMillis();
+            }
+            boolean enableHybrid = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
+            Map<String, Object> result = planThenExecuteAppService.chat(
+                    request.getQuestion(), sessionId, true, enableHybrid, request.getTopK());
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            Map<String, Object> err = new java.util.HashMap<>();
+            err.put("answer", "❌ Plan Agent 处理失败: " + e.getMessage());
+            err.put("sources", List.of());
+            err.put("mode", "plan");
+            err.put("steps", List.of());
+            err.put("stepCount", 0);
+            return ResponseEntity.internalServerError().body(err);
+        }
+    }
+
+    /**
      * ReAct 流式端点（SSE）。
      * 返回 text/event-stream，事件序列：
      *   step_start → thought_delta*N → thought_end
@@ -157,6 +187,23 @@ public class ChatController {
                 : request.getSessionId();
         boolean enableHybrid = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
         return reActAgentAppService.chatStream(
+                request.getQuestion(), sessionId, true, enableHybrid, request.getTopK());
+    }
+
+    /**
+     * Plan-then-Execute 流式端点（SSE）。
+     * 事件序列与 ReAct 流式对齐，前端可复用同一套渲染：
+     *   rag_ready → step_start → thought_end → action_start → action_end
+     *     （步骤间按依赖波次推进，无依赖步骤并行执行）
+     *     → solve_start → final_delta*N → done
+     */
+    @PostMapping(value = "/plan-chat-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter planChatStream(@RequestBody ChatRequestDTO request) {
+        String sessionId = (request.getSessionId() == null || request.getSessionId().isBlank())
+                ? "plan-stream-" + System.currentTimeMillis()
+                : request.getSessionId();
+        boolean enableHybrid = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
+        return planThenExecuteAppService.chatStream(
                 request.getQuestion(), sessionId, true, enableHybrid, request.getTopK());
     }
 

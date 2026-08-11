@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -116,10 +117,11 @@ public class AuthController {
         boolean authenticated = session != null && session.getAttribute(SESSION_USER_KEY) != null;
         String username = authenticated ? (String) session.getAttribute(SESSION_USER_KEY) : null;
 
-        return ResponseEntity.ok(Map.of(
-                "enabled", authProperties.isEnabled(),
-                "authenticated", authenticated,
-                "username", username
-        ));
+        // 用 LinkedHashMap 而非 Map.of：未登录时 username 为 null，Map.of 对 null 值会抛 NPE。
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("enabled", authProperties.isEnabled());
+        body.put("authenticated", authenticated);
+        body.put("username", username);
+        return ResponseEntity.ok(body);
     }
 }
