@@ -1,6 +1,6 @@
 # 智能运维 RAG + Agent 一体化平台
 
-> 基于 Spring Boot 4.0.7 + Spring AI 2.0.0 GA + JDK 21 的企业级知识库问答与智能 Agent 平台。采用 **DDD 四层 + 六边形（Port-Adapter）** 架构，内置 **双模式 Agent**（原生 Tool Calling / 手动 ReAct 循环）、**混合检索**（向量 + 关键词线性加权融合）、**启发式路由 + 影子路由比对**、**Prompt Injection 防护**、**文档版本状态机**、**决策链路全审计** 等完整能力，同时适配本地 Ollama（离线）与阿里云百炼 DashScope（云端）双后端。
+> 基于 Spring Boot 4.0.7 + Spring AI 2.0.0 GA + JDK 21 的企业级知识库问答与智能 Agent 平台。采用 **DDD 四层 + 六边形（Port-Adapter）** 架构，内置 **五种工作模式**（原生 Tool Calling Agent / 手动 ReAct 循环 / 对比模式 / **Plan-then-Execute 规划模式** / 纯 RAG 知识库）、**混合检索**（向量 + 关键词线性加权融合）、**启发式路由 + 影子路由比对**、**Prompt Injection 防护**、**文档版本状态机**、**决策链路全审计** 等完整能力，同时适配本地 Ollama（离线）与阿里云百炼 DashScope（云端）双后端。
 
 ---
 
@@ -8,17 +8,19 @@
 
 | 模块 | 能力说明 | 关键实现细节 |
 |------|---------|-------------|
-| **🧠 RAG 混合检索** | 向量检索 + 关键词检索线性加权融合 | 权重：向量 0.7 / 关键词 0.3；10 组业务同义词扩展（账单↔计费等）；中文 N-gram 滑窗分词；标题 headingPath 额外加权；**向量层全低于阈值时关键词层不许单独救回**；**检索为空直接返回不调 LLM** |
+| **🧠 RAG 混合检索** | 向量检索 + 关键词检索线性加权融合 | 权重：向量 0.7 / 关键词 0.3；6 组业务同义词扩展（账单↔计费等）+ 中文 N-gram 滑窗分词；标题 headingPath 额外加权；**向量层全低于阈值时关键词层不许单独救回**；**检索为空直接返回不调 LLM** |
 | **✂️ 语义切分** | Markdown 结构感知 + 四级分隔符递归降级 | `OverlappingTextSplitter` 按段落→换行→句末→字符逐级切分；`MarkdownSectionParser` 保留完整标题路径 `A > B > C`；Chunk 正文可前置章节前缀注入 embedding |
-| **🔁 查询改写** | 多轮省略式问题还原（独立 LLM 后端） | 默认用 qwen-turbo 非推理模型（3s 超时守护）；改写结果**仅用于检索，不污染对话历史**；改写关闭时退回启发式历史拼接；**纯 RAG 链路现已写入会话历史，改写可拿到上下文** |
-| **🤖 原生 Tool Calling** | Spring AI 2.0 `ChatClient.tools()` 官方循环 | `@Tool` 注解自动注册 6 个设备/能耗工具；框架内部最多 5 轮循环；附带 **TextToolCallParser** 兜底识别模型把调用写成文本 JSON 的场景 |
+| **🔁 查询改写** | 多轮省略式问题还原（独立 LLM 后端） | 默认 Ollama `qwen3.7-plus`（10s 超时守护）；改写结果**仅用于检索，不污染对话历史**；改写关闭时退回启发式历史拼接；**纯 RAG 链路现已写入会话历史，改写可拿到上下文** |
+| **🤖 原生 Tool Calling** | Spring AI 2.0 `ChatClient.tools()` 官方循环 | `@Tool` 注解自动注册 8 个工具（设备/能耗/时间/天气）；框架内部最多 5 轮循环；附带 **TextToolCallParser** 兜底识别模型把调用写成文本 JSON 的场景 |
 | **🧠 手动 ReAct 循环** | Thought → Action → Observation 全流程 | `ReActAgentAppService` 手写 ReAct 循环；每一步严格 JSON 格式解析；支持 **SSE 流式推送**（step_start → thought_delta → action_start → final_delta → done） |
+| **📋 Plan-then-Execute** | 先规划 → 并行执行 → 一次综合 | `PlanThenExecuteAppService` 三个阶段：Planner 一次产出完整计划（ReWOO `$N` 占位符引用后续步骤产物）→ Executor 拓扑调度、无依赖步骤并行 → Solver 一次 LLM 综合全部 Observation |
 | **🔀 对比模式** | Agent vs ReAct 同请求双跑 | `POST /ai/compare-chat` 一份请求同时跑两条链路，返回 elapsed / steps / answer，用于效果评估 |
 | **⚡ 启发式路由** | FORCE_EXEC / RECOMMEND_LLM 双策略 | 列出设备、近 N 天能耗等高频纯工具场景，FORCE_EXEC 直接跳检索跳 LLM；**领域实词与追问标记分离判定，防止"如何创建用户呢"被误判为同话题** |
 | **👥 影子路由** | 正则 vs LLM 异步灰盒比对 | 每次请求异步多问一次「LLM 会选哪个工具」，7 种判定结果写入 AgentTrace；**复用 QueryRewrite 轻量后端**，验证完可一键关闭或抽样 |
-| **🛡️ 安全防护** | Prompt Injection 拦截 + 四级幻觉防线 | 三类攻击模式：忽略指令 / 角色篡改 / 规则绕过；幻觉防护：空检索直接拒绝 + 相似度阈值 + 保底块标记 + 低置信度提示词降级 |
-| **📚 文档版本管理** | DRAFT → ACTIVE → ARCHIVED 状态机 | **发布时才入库向量**；增量更新只清该文档旧向量，不动全库；10 个 REST 接口全覆盖 |
+| **🛡️ 安全防护** | Prompt Injection 拦截 + 四级幻觉防线 | `PromptInjectionDetector` 纯代码模式匹配（不依赖模型判断）：忽略指令 / 角色篡改 / 规则绕过三类攻击；幻觉防护：空检索直接拒绝 + 相似度阈值 + 保底块标记 + 低置信度提示词降级 |
+| **📚 文档版本管理** | DRAFT → ACTIVE → ARCHIVED 状态机 | **发布时才入库向量**；增量更新只清该文档旧向量，不动全库；REST 接口覆盖上传/更新/发布/归档/删除/入库 |
 | **🔍 决策链路审计** | 每轮 Agent 决策全落库 | LLM 决策、工具入参/出参、耗时、异常；按 Session 回放；内置可视化页面 `agent-trace.html` |
+| **🔐 登录认证** | Basic Auth + Session | `AuthController` 登录/登出/状态查询；`BasicAuthFilter` 拦截非登录接口，除登录页/登录接口/H2 控制台外均需认证 |
 | **📊 可观测性** | 全链路 TraceId | `TraceIdFilter` MDC 贯通；日志 `[traceId=xxx]` 对齐；Actuator + Prometheus 就绪 |
 
 ---
@@ -29,12 +31,12 @@
 |------|------|---------|
 | 语言 / 框架 | JDK 21 · Spring Boot **4.0.7** GA · Spring Framework 7.0.8 | JDK 必须 21+ |
 | AI 框架 | Spring AI **2.0.0** GA（groupId `org.springframework.ai`） | 含 `spring-ai-rag` 模块（预留后续 BM25/RRF 升级接口） |
-| 聊天模型 | 三选一：Ollama `qwen2.5:1.5b` / DashScope `qwen3.7-flash` / 任意 OpenAI 兼容协议 | 支持混用：聊天/改写/向量各选各的后端 |
-| 向量化模型 | 推荐 Ollama `nomic-embed-text`（免费、离线），或 DashScope `text-embedding-v3` | docker-compose 默认 `bge-m3` |
+| 聊天模型 | 三选一：Ollama `qwen2.5:1.5b` / DashScope `qwen3.7-plus` / 任意 OpenAI 兼容协议 | 支持混用：聊天/改写/向量各选各的后端 |
+| 向量化模型 | 推荐 Ollama `bge-m3`（默认）或 `nomic-embed-text`，或 DashScope `text-embedding-v3` | docker-compose 默认 `bge-m3` |
 | 向量库 | SimpleVectorStore + JSON 持久化 | 通过 `VectorStorePort` 可无缝切换 PGVector/Milvus/RedisSearch |
 | 元数据存储 | H2 File Mode + Hibernate 7.2 | 生产可替换 PostgreSQL，方言已显式配置 |
 | 时序数据 | InfluxDB 1.8 SQL 聚合查询 | 通过 `TimeSeriesDbPort` 适配 |
-| 前端 | 原生 HTML + JS（零构建） | 聊天 / 知识库管理 / 决策审计 三页内置 |
+| 前端 | 原生 HTML + JS（零构建） | 聊天 / 知识库管理 / 决策审计 三页内置，会话与模式记忆存 localStorage |
 
 > ⚠️ **关于 BM25 / RRF**：Spring AI 2.0.0 GA 已将 `BM25Retriever` + `EnsembleRetriever` 从 GA 包移除（目前仅在 M 系列里程碑中），本项目采用自定义的**线性加权融合检索**替代（六层防线设计见下文）。`pom.xml` 已引 `spring-ai-rag` 做预留，等后续版本加回 BM25/RRF 后，只需替换 `RagAppService.java:hybridSearch()` 内部实现即可，接口层零改动。
 
@@ -49,6 +51,7 @@ src/main/java/com/example/ragassitant/
 │   └── service/
 │       ├── AgentAppService             # 三路径编排：闲聊短路 → FORCE_EXEC → 原生 Tool Calling
 │       ├── ReActAgentAppService        # 手动 ReAct 循环：普通 + SSE 流式 双入口
+│       ├── PlanThenExecuteAppService   # Planner → Executor(并行) → Solver 三段式，普通 + SSE 流式
 │       ├── RagAppService               # 混合检索（线性加权 + 幻觉防护四级闸门）
 │       ├── IngestAppService            # 文件分派 → 切分 → 向量入库
 │       ├── DocumentAppService          # 文档版本状态机 + 发布时向量清理
@@ -56,8 +59,8 @@ src/main/java/com/example/ragassitant/
 │       └── ShadowToolRouter            # 影子路由：LLM vs 正则异步比对，7 类判定
 │
 ├── domain/                         # 【领域层】纯 POJO，零 Spring / 外部依赖
-│   ├── model/                          # Device, EnergyRecord, ToolCall, RagAnswer, ChunkMetaKeys
-│   ├── service/                        # HeuristicRouter, TextToolCallParser, PromptBuilder, ...
+│   ├── model/                          # Device, EnergyRecord, ToolCall, PlanStep, RagAnswer, ChunkMetaKeys
+│   ├── service/                        # HeuristicRouter, TextToolCallParser, PromptBuilder, PromptInjectionDetector, ...
 │   └── spi/                            # ← Port（端口接口，被 Application 层依赖）
 │       ├── LlmPort                     # chat / chatWithRawMessages / chatWithAutoToolCalling / chatStream*
 │       ├── VectorStorePort / TimeSeriesDbPort
@@ -70,27 +73,27 @@ src/main/java/com/example/ragassitant/
 │   ├── tsdb/       InfluxDB18TimeSeriesAdapter  # 6 种时间范围 + 重聚合
 │   ├── session/    InMemoryConversationStore    # 多轮会话记忆 + TTL 定时清理
 │   ├── agent/
-│   │   ├── DeviceTools.java             # 6 个 @Tool 方法（设备/能耗查询）
-│   │   ├── ToolCatalog.java             # 工具清单渲染（ReAct 提示词 / 影子路由用）
+│   │   ├── DeviceTools.java             # 8 个 @Tool 方法（设备/能耗/时间/天气）
+│   │   ├── ToolCatalog.java             # 工具清单渲染（ReAct / Plan / 影子路由提示词用）
 │   │   ├── SpringAiToolRegistry.java    # ToolRegistryPort 实现（反射调用 + 参数校验）
 │   │   └── TracingToolCallback.java     # 原生 Tool Calling 触发时打 trace
 │   ├── reader/     SpringAiDocumentReader       # md/pdf/word/excel；MarkdownSectionParser
-│   ├── config/     VectorStoreInfraConfig / LlmBackendConfig（多后端 + 改写独立后端）
+│   ├── config/     VectorStoreInfraConfig / LlmBackendConfig / AgentProperties / AuthProperties
 │   └── persistence/jpa/
 │       ├── DocumentVersionJpaEntity + Repository（文档状态机）
 │       └── AgentTraceJpaEntity + Repository + JpaAgentTraceStoreAdapter
 │
 ├── interfaces/                     # 【接口层】HTTP <-> DTO，零业务逻辑
 │   ├── rest/
-│   │   ├── ChatController.java         # /ai/chat, /ai/agent-chat, /ai/react-agent-chat, ...
-│   │   ├── DocumentController.java     # /api/docs/**（版本管理 10 个接口）
+│   │   ├── ChatController.java         # /ai/chat, /ai/agent-chat, /ai/react-agent-chat, /ai/plan-chat, /ai/compare-chat, ...
+│   │   ├── DocumentController.java     # /api/docs/**（版本状态机 + 加库 + 重建）
 │   │   ├── AgentTraceController.java   # /api/agent/traces/**（审计 + 影子路由统计）
-│   │   └── AuthController.java         # Basic Auth 登录接口
+│   │   └── AuthController.java         # /api/auth/login|logout|status + 根路径重定向
 │   └── dto/request / response
 │
 └── common/                         # 横切关注点
     ├── trace/      TraceIdFilter（MDC 注入 + X-Trace-Id 透传）
-    ├── filter/     BasicAuthFilter（可开关 Basic 认证）
+    ├── filter/     BasicAuthFilter（可开关 Basic 认证 + Session）
     ├── utils/      SnUtils（SN 归一化去空格/括号）
     └── exception/  BizException + GlobalExceptionHandler
 ```
@@ -99,16 +102,37 @@ src/main/java/com/example/ragassitant/
 
 ---
 
-## 💡 核心逻辑详解一：Agent 三路径 + 双模式
+## 💡 核心逻辑详解一：Agent 四种实现 + 三路编排
 
-### 1. 两种 Agent 实现对比
+### 1. 四种 Agent 实现对比
 
 | 模式 | 实现类 | 循环方式 | 适用模型 | 流式输出 |
 |------|-------|---------|---------|---------|
-| **Spring AI 原生 Tool Calling** | `AgentAppService` | `ChatClient.tools(...)` 框架内部循环 | 支持 function calling：qwen3.7-flash / gpt-4o-mini 等 | ❌ 返回最终结果 |
+| **Spring AI 原生 Tool Calling** | `AgentAppService` | `ChatClient.tools(...)` 框架内部循环 | 支持 function calling：qwen3.7-plus / gpt-4o-mini 等 | ❌ 返回最终结果 |
 | **手动 ReAct 循环** | `ReActAgentAppService` | 手写 `for (step 1..maxSteps)` + 严格 JSON 解析 | 不支持 function calling 的小模型：qwen2.5:1.5b 等 | ✅ SSE 逐 thought/action 推送 |
+| **Plan-then-Execute** | `PlanThenExecuteAppService` | Planner 一次规划 → Executor 并行执行 → Solver 一次综合 | 中等模型以上效果更佳（需要一次产出多步计划） | ✅ SSE 逐步骤 + 最终 token 流式 |
+| **对比模式** | 前端双向双跑 | 同请求并行调 `AgentAppService` + `ReActAgentAppService` | 任意 | ❌ 返回两者完整 JSON |
 
-两种模式可独立使用，也可通过 `/ai/compare-chat` 同请求对比效果（返回 elapsed/steps/answer 差异）。
+**Plan-then-Execute 与 ReAct 的本质区别**：
+
+```
+                Planner(一次规划)    Executor(并行执行)     Solver(一次综合)
+  ReAct         ✗ 逐轮思考           ✗ 每轮一个工具          ✗ 每轮一次 LLM
+  Plan-Exec     一次 LLM 调用        无依赖步骤并行           一次 LLM 调用
+```
+
+```java
+// ReWOO 思路：Planner 用 $N 占位符引用后续步骤产物，规划时无需真的看到中间结果
+{
+  "reasoning": "先查清单拿到 SN，再按 SN 查能耗",
+  "steps": [
+    {"step": 1, "tool": "list_devices", "arguments": {}, "depends_on": []},
+    {"step": 2, "tool": "query_energy_half_year", "arguments": {"sn": "$1"}, "depends_on": [1]}
+  ]
+}
+```
+
+核心收益：无依赖的工具步骤并行执行，**墙钟时间 ≈ 最慢那一步而非步骤之和**；Observation 一次性交给 Solver，不给模型逐轮回灌中间结果，省 token。
 
 ### 2. AgentAppService：请求必走三路径之一（且仅走一条）
 
@@ -138,7 +162,7 @@ src/main/java/com/example/ragassitant/
 
 这是从真实线上事故抠出来的防线：用户第一句「列出所有设备」（正确回答），第二句只说「你好」→ 走 RAG 检索必然召回电能质量 FAQ → FAQ 以「知识库参考内容」名义拼进提示词 → 模型回「我已经阅读了知识库中的内容…」并把 FAQ 整段总结。用户看到的是一次没人问过的知识库问答。
 
-所以闲聊必须在 **改写 / 路由 / 检索** 三者之前一起短路。纯 RAG 链路同样会被「你好」击中，现已同步前置短路。
+所以闲聊必须在 **改写 / 路由 / 检索** 三者之前一起短路。纯 RAG 链路、ReAct 链路、Plan 链路全部同步前置短路。
 
 ### 4. 同话题判定：领域实词 vs 追问标记必须分离
 
@@ -184,7 +208,37 @@ src/main/java/com/example/ragassitant/
 
 ---
 
-## 💡 核心逻辑详解二：RAG 检索的幻觉防线
+## 💡 核心逻辑详解二：Plan-then-Execute 三段式流水线
+
+### 1. 阶段一：Planner（一次 LLM 调用产出完整计划）
+
+用 `buildPlanSystemPrompt` 让模型输出严格 JSON 计划（`reasoning` + `steps[]`），解析时做五层防御：
+
+- 剥 ```` ``` ```` 代码块围栏 → 取首个 `{` 到末个 `}` → 反序列化 → **校验步骤数上限（5 步）**
+- 任一步骤工具名不在 `ToolCatalog` 中 -> 剔除该步骤（其依赖者随之失效），不会打到未知工具
+- 步骤参数值可用 `$N` 引用前面步骤的产物（ReWOO），Executor 执行前替换成该步 Observation（截断 2000 字防爆上下文）
+
+### 2. 阶段二：Executor（拓扑调度 + 无依赖步骤并行）
+
+```
+每轮（wave）取「依赖全部完成」的步骤 → 并行执行（线程池上限 4）→ 结果写入 Map<step, observation>
+   │
+   ├─ 循环依赖 / 引用了不存在的步骤 → 剩余步骤标记失败，提前结束
+   │
+   └─ 失败隔离：单个工具抛异常不会拖垮同波其他步骤
+        → 该步 Observation 记为错误文本，后续步骤照常执行
+        → 依赖方经 $N 引用失败步骤时拿到的是错误说明而非空串，Solver 才能如实报告
+```
+
+### 3. 阶段三：Solver（一次 LLM 调用综合全部 Observation）
+
+`buildPlanSolverSystemPrompt` 把「工具执行结果」+「RAG 资料」一次性给全，只调一次 LLM 生成最终答案。数据有硬约束：设备/能耗数据必须来自工具结果、文档内容必须来自 RAG 资料，禁止编造。
+
+> **何时 Solver 没有工具可依赖**：Planner 输出 `"steps":[]`（如纯知识库问题），则 Solver 仅凭 RAG 上下文回答；Planner 异常时回退为直接 Solver。
+
+---
+
+## 💡 核心逻辑详解三：RAG 检索的幻觉防线
 
 ### 1. 为什么不用纯向量检索？中文 RAG 的典型盲区
 
@@ -200,7 +254,7 @@ src/main/java/com/example/ragassitant/
 
 | # | 防线 | 代码位置 | 解决的问题 |
 |---|------|---------|-----------|
-| ① | **同义词硬规则扩展** | `RagAppService.java:SYNONYM_MAP` + `expandChineseKeywords()` | 账单↔计费 / 报表↔报告 / 登录↔登入 / 用户↔账号，固定 10 对高频业务词，零成本零误判 |
+| ① | **同义词硬规则扩展** | `RagAppService.java:SYNONYM_MAP` + `expandChineseKeywords()` | 账单↔计费 / 流程↔步骤 / 用户↔账号 / 新增↔创建 / 设备↔装置 / 能耗↔用电，固定 6 组高频业务词，零成本零误判 |
 | ② | **中文 N-gram 分词兜底** | `RagAppService.java:expandChineseKeywords()` 滑窗 | 长词拆成 2~4 字滑窗："手动账单流程" → "手动 动账 账单 单流 流程 手动账..."，总有一个子串命中 |
 | ③ | **双通道线性加权融合** | `RagAppService.java:linearWeightHybridSearch()` 融合公式 | `score = 0.7*向量分 + 0.3*关键词分`；向量负责模糊语义，关键词负责精确字面 |
 | ④ | **向量层全低，关键词层禁用** | `RagAppService.java:linearWeightHybridSearch()` 开头判定 | 向量认定全库不相关时，关键词层不许单独把巧合命中救回（中文单字巧合几乎等于噪声） |
@@ -215,10 +269,10 @@ src/main/java/com/example/ragassitant/
 
 | 层级 | 机制 | 代码位置 |
 |------|------|---------|
-| ① **空检索直接拒绝** | 检索结果为 0 块时，**直接返回确定性答案**「知识库中没有找到相关信息」，**不发起 LLM 调用**，从根上断掉「空上下文脑补」 | `RagAppService.java:askWithOptions()` 第 218 行 |
+| ① **空检索直接拒绝** | 检索结果为 0 块时，**直接返回确定性答案**「知识库中没有找到相关信息」，**不发起 LLM 调用**，从根上断掉「空上下文脑补」 | `RagAppService.java:askWithOptions()` |
 | ② **阈值闸门** | `VectorStoreDocumentRetriever` 显式设置 `similarityThreshold`（YAML 默认 0.40），低于阈值直接丢弃；**设阈值后无命中不再回退无阈值接口** | `RagAppService.java:buildRetriever()` + `vectorSearch()` |
 | ③ **保底块标记** | 即使都低于阈值，`min-keep-chunks` 也会留 N 块，但打上 `belowThreshold=true` 标签 | `RagAppService.java:applyThreshold()` |
-| ④ **提示词降级** | 纯 RAG 链路：全是保底块 → 切换到「不许强行总结」的低置信度提示词；Agent 链路：保底块直接丢弃（还有工具和常识能力，宁可空上下文也不要无关文档） | `RagAppService.java:askWithOptions()` + `AgentAppService.java:retrieveContext()` |
+| ④ **提示词降级** | 纯 RAG 链路：全是保底块 → 切换到「不许强行总结」的低置信度提示词；Agent/ReAct/Plan 链路：保底块直接丢弃（还有工具和常识能力，宁可空上下文也不要无关文档） | `RagAppService.java:askWithOptions()` + 各 Agent 服务的 `retrieveContext()` |
 
 ### 4. 文档切分的"不切断语义"原则
 
@@ -231,7 +285,7 @@ L0 段落（\n\n\r\n\r\n） → L1 换行（\n） → L2 中文句末（。！�
 - **Overlap 不是硬切 N 字符**，而是「往回退到完整 atom 边界」——保证 overlap 开头一定是句子开头
 - **headingPath 一路透传**：`MarkdownSectionParser` 用栈维护标题路径，每个 chunk 的 metadata 都带 `A > B > C`
 
-> ⚠️ **改完 chunk-size / overlap 后，必须跑 `POST /ai/ingest` 全量重建向量库**，否则旧向量库还是旧切分结果。
+> ⚠️ **改完 chunk-size / overlap 后，必须重新构建知识库（`POST /api/docs/ingest-all`）**，否则旧向量库还是旧切分结果。
 
 ---
 
@@ -252,7 +306,7 @@ Query 改写？（多轮场景 + 改写已开启）※ 纯 RAG 链路现已写�
 同义词扩展 + 中文 N-gram + headingPath 加权
    │
    ▼
-双通道并行检索：向量检索(topK*5) + 关键词全文检索
+双通道并行检索：向量检索(topK*2) + 关键词全文检索
    │
    ▼
 向量层全低于阈值？ ──是──→ 跳过关键词层救回 → 结果可能为空
@@ -298,7 +352,7 @@ LLM 生成最终回答 + SourceDoc 返回前端
         │
         ├─ RECOMMEND_LLM 命中：把工具建议附到提示词末尾，LLM 拍板
         │
-        └─ Spring AI 2.0 ChatClient.tools(DeviceTools @Tool ×6)
+        └─ Spring AI 2.0 ChatClient.tools(DeviceTools @Tool ×8)
               · LLM 通过原生 tool_calls 通道识别
               · TracingToolCallback 打 trace
               · 最多 5 轮直到最终纯文本回答
@@ -341,17 +395,40 @@ for step 1..maxSteps:
 done 事件（携带总步骤、耗时、sources、会话信息）
 ```
 
-**SSE 事件序列一览**：
+### 4. Plan-then-Execute + SSE 流式（`/ai/plan-chat-stream`）
+
+```
+用户提问
+   │
+   ├─ 闲聊短路 / Prompt Injection：流式 done（同一套判定）
+   │
+   ▼
+Planner（静默一次生成完整 JSON 计划）── 解析失败 → 回退为直接 Solver
+   │
+   ▼
+Executor（拓扑调度，事件逐个推送）：
+   │
+   ├─ step_start（step/maxSteps）
+   ├─ thought_end（thought=“计划步骤 N：调用 tool”）
+   ├─ action_start（tool + arguments）
+   └─ 工具并行执行完 → action_end（observation + durationMs）
+   │
+   ▼
+Solver：solve_start → final_delta*N（最终答案按 token 打字机）→ done
+```
+
+**SSE 事件序列一览**（ReAct 与 Plan 共用前端 `handleSseEvent` / `renderReActSteps` 渲染）：
 
 | 事件名 | 触发时机 | 负载 |
 |-------|---------|------|
 | `rewrite` | Query 改写生效 | `{from, to, ms}` |
 | `rag_ready` | RAG 检索返回了结果 | `{count}` |
 | `step_start` | 每步推理开始 | `{step, maxSteps}` |
-| `thought_delta` | Thought 阶段流式 token | `{step, delta}` |
-| `thought_end` | Thought 阶段结束 | `{step, thought, isFinalAnswer, tool?, arguments?}` |
+| `thought_delta` | （ReAct）Thought 阶段流式 token | `{step, delta}` |
+| `thought_end` | Thought 阶段结束 / （Plan）每步开始即发 | `{step, thought, isFinalAnswer, tool?, arguments?}` |
 | `action_start` | 工具执行前 | `{step, tool, arguments}` |
 | `action_end` | 工具执行完 | `{step, observation, durationMs, tool}` |
+| `solve_start` | （Plan）Solver 综合阶段开始 | `{}` |
 | `final_start` | 最终回答打字机前 | `{length}` |
 | `final_delta` | 最终回答逐字/逐词 | `{delta}` |
 | `security_block` | Prompt Injection 被拦 | `{type, attackType, answer}` |
@@ -371,12 +448,10 @@ java -version      # 必须 openjdk version "21.x"
 # ============== 2. 模型（后端可混搭）==============
 # 【方案 A：完全离线 Ollama】
 ollama pull qwen2.5:1.5b          # 聊天模型（约 1GB，CPU 可跑，推荐用于 ReAct 模式）
-ollama pull nomic-embed-text      # 向量编码（必拉，框架默认值 mxbai-embed-large 不存在）
-# 或者用 bge-m3（docker-compose 默认配置）
-ollama pull bge-m3
+ollama pull bge-m3                # 向量编码（yaml 默认项）；或 pull nomic-embed-text
 
 # 【方案 B：云端 DashScope】
-# 登录 https://bailian.console.aliyun.com/ 创建 API Key，下一步配置里注入即可
+# 登录 https://bailian.console.aliyun.com/ 创建 API Key，通过环境变量 DASHSCOPE_API_KEY 注入
 
 # ============== 3. InfluxDB（能耗工具用，可选）==============
 # 没装也能启动，Agent 调能耗工具时会报错但不影响知识库问答
@@ -388,7 +463,7 @@ ollama pull bge-m3
 # 编译打包
 mvn clean package -DskipTests
 
-# ===== 启动（N 种方式按需选）=====
+# ===== 启动（N 种方式按需选，均需登录 admin/admin123，可用 AUTH_ENABLED=false 关闭）=====
 
 # 方式 1：纯离线 Ollama（默认，改 IP 就行）
 java -jar target/rag-assistant-1.0.0.jar \
@@ -400,11 +475,9 @@ java -jar target/rag-assistant-1.0.0.jar \
   --EMBED_BACKEND=dashscope \
   --DASHSCOPE_API_KEY=sk-你的百炼Key
 
-# 方式 3：混合模式（推荐：聊天用云端 qwen-turbo 改写，向量用本地离线）
+# 方式 3：混合模式（推荐：聊天用云端 qwen3.7-plus，改写与向量本地离线）
 java -jar target/rag-assistant-1.0.0.jar \
   --CHAT_BACKEND=dashscope \
-  --REWRITE_BACKEND=dashscope \
-  --REWRITE_MODEL=qwen-turbo \
   --DASHSCOPE_API_KEY=sk-你的百炼Key \
   --OLLAMA_BASE_URL=http://你的OllamaIP:11434
 
@@ -414,31 +487,34 @@ java -jar target/rag-assistant-1.0.0.jar \
   --OLLAMA_BASE_URL=http://你的OllamaIP:11434
 
 # ===== 构建知识库 =====
-curl -X POST http://localhost:8900/ai/ingest
-# 返回：{"success":true,"count":42,"message":"知识库已重新构建，共 42 条向量"}
+curl -X POST http://localhost:8900/api/docs/ingest-all
+# 返回：{"success":true,"chunkCount":42,"message":"知识库已重建，共 42 个向量块"}
 ```
 
 ### 第三步：Docker Compose 一键启动
 
+项目内置 `Dockerfile`（两阶段构建，运行镜像仅 ~280MB）+ `docker-compose.yml`（DashScope 版示例），使用方法：
+
 ```bash
-# Linux （Ollama 跑在宿主机，用 host 网络）
+# 1) 把 docker-compose.yml 里的 DASHSCOPE_API_KEY 改成你的真实 Key
+# 2) 构建启动
 docker compose up -d --build
 
-# Windows/Mac （Ollama 跑在宿主机，用 bridge 网络 + host.docker.internal）
-# 先把 docker-compose.yml 里的 network_mode: host 改成 network_mode: bridge，去掉注释 ports 段
-# 并把 OLLAMA_BASE_URL 改成 http://host.docker.internal:11434
-docker compose up -d --build
-
-# 看日志
+# 3) 看日志 / 停止
 docker compose logs -f rag
+docker compose down
+
+# 访问：http://localhost:8900   admin / admin123
 ```
+
+> 纯 Ollama 环境：把 `CHAT_BACKEND` / `EMBED_BACKEND` 改成 `ollama`，并把 `OLLAMA_BASE_URL` 指向宿主机 Ollama（Windows/Mac 用 `http://host.docker.internal:11434`，Linux 可用 host 网络）。
 
 ### 第四步：验证页面一览
 
 | 页面 | 地址 | 说明 |
 |------|------|------|
-| **聊天首页** | http://localhost:8900/ | 单会话聊天，支持切换 Agent / 纯 RAG 模式 |
-| **知识库管理** | http://localhost:8900/docs.html | 文档上传、版本列表、发布/归档操作 |
+| **聊天首页** | http://localhost:8900/ | **五种模式**（Agent / ReAct / 对比 / Plan-then-Execute / 知识库）+ 多会话历史，模式随会话记忆 |
+| **知识库管理** | http://localhost:8900/docs.html | 文档上传、版本列表、发布/归档、加入知识库、全量重建 |
 | **决策链路审计** | http://localhost:8900/agent-trace.html | Agent 每轮决策可视化、工具入参出参回放、影子路由统计 |
 | **H2 控制台** | http://localhost:8900/h2-console | JDBC `jdbc:h2:file:./data/ragdb`，用户名 `sa` 密码空 |
 | **Actuator 健康检查** | http://localhost:8900/actuator/health | Spring Boot 健康检查 + Prometheus 指标 |
@@ -454,7 +530,7 @@ docker compose logs -f rag
 
 ```yaml
 agent:
-  max-tool-calls: 5           # 原生 Tool Calling 最大轮次 / ReAct 最大 step 数
+  max-tool-calls: 5           # 原生 Tool Calling 最大轮次 / ReAct 最大 step 数 / Plan 最大波次
   memory-size: 20             # 每个会话最多带入多少轮历史
   session-ttl-minutes: 120    # 会话内存保留时长
   max-sessions: 500           # 最多同时保留会话数
@@ -480,13 +556,11 @@ rag:
     vector-weight:  0.7
 
   # === 幻觉防护（现已全部接入代码）===
-  # 【注意】代码构造函数里默认 similarity-threshold=0.0 / min-keep-chunks=0
-  #        但下方 YAML 覆盖值是 0.40 / 1，实际运行以 YAML / 环境变量为准
   similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.40}  # 只卡向量余弦分，不卡混合分
   min-keep-chunks: ${RAG_MIN_KEEP:1}                      # 全低时保底留 N 块（设为 0 则不保底）
   pure-knowledge-mode: ${RAG_PURE_MODE:false}             # true=禁用所有设备/能耗工具，只走 RAG
 
-  # === 文档切分（改完必须重新 ingest）===
+  # === 文档切分（改完必须重新 ingest-all）===
   chunking:
     chunk-size-chars: 600     # 按字符，不是 token（中文 token 误差大）
     overlap-chars: 90         # 约 15%，实际会收紧到句子边界
@@ -497,9 +571,9 @@ rag:
   # === Query 改写 ===
   query-rewrite:
     enabled: true
-    backend: dashscope        # 独立后端，推荐 qwen-turbo（非推理模型，0.47s）
-    model: qwen-turbo         # ❗千万别用 qwen3.7-flash 推理模型，会先思考撞 3s 超时
-    timeout-ms: 3000          # 超时静默回退，不阻断主流程
+    backend: ${REWRITE_BACKEND:ollama}   # 独立后端，与主聊天后端解耦
+    model: ${REWRITE_MODEL:qwen3.7-plus} # 用非推理模型（推理模型会先思考撞超时）
+    timeout-ms: 10000         # 超时静默回退，不阻断主流程
     max-history-pairs: 3
     max-length-ratio: 3.0     # 改写后超原长度 3 倍 → 判定跑飞，回退
 ```
@@ -516,15 +590,28 @@ spring:
       base-url: ${OLLAMA_BASE_URL:http://192.168.221.130:11434}
       default-chat-options:
         model: ${OLLAMA_CHAT_MODEL:qwen2.5:1.5b}
+        temperature: 0.3
       embedding:
         options:
-          model: ${OLLAMA_EMBED_MODEL:nomic-embed-text}   # 框架默认 mxbai-embed-large 不存在，必改
+          model: ${OLLAMA_EMBED_MODEL:bge-m3}      # 默认 bge-m3（nomic-embed-text 也可）
 
     openai:   # DashScope 走 OpenAI 兼容协议
       api-key:  ${DASHSCOPE_API_KEY:}
       base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
       default-chat-options:
-        model: ${DASHSCOPE_CHAT_MODEL:qwen3.7-flash}
+        model: ${DASHSCOPE_CHAT_MODEL:qwen3.7-plus}
+        temperature: 0.3
+```
+
+> ⚠️ **安全提醒**：`application-ai.yml` 里 `openai.api-key` 请通过环境变量 `DASHSCOPE_API_KEY` 注入，**不要提交真实 Key 到仓库**，避免密钥泄漏。
+
+### ④ 登录认证（`application-auth.yml`）
+
+```yaml
+auth:
+  enabled: ${AUTH_ENABLED:true}       # 是否启用登录认证（true=启用，false=关闭）
+  username: ${AUTH_USERNAME:admin}    # 登录用户名
+  password: ${AUTH_PASSWORD:admin123} # 登录密码
 ```
 
 ---
@@ -539,12 +626,13 @@ spring:
 | `POST` | `/ai/agent-chat` | Agent 模式：三路径编排 + 启发式路由 + 混合检索 + 多轮记忆 |
 | `POST` | `/ai/react-agent-chat` | ReAct 模式：手写 Thought-Action-Observation 循环，返回 JSON（含 step 详情） |
 | `POST` | `/ai/react-agent-chat-stream` | **ReAct SSE 流式**：step_start → thought_delta → action_start → final_delta → done |
+| `POST` | `/ai/plan-chat` | **Plan-then-Execute 普通版**：返回计划步骤 + 执行步骤 + Solver 综合答案 |
+| `POST` | `/ai/plan-chat-stream` | **Plan SSE 流式**：step_start → thought_end → action_start → action_end → solve_start → final_delta → done |
 | `POST` | `/ai/compare-chat` | **对比模式**：同请求跑 Agent + ReAct 两条链路，返回 elapsed/steps/answer |
-| `POST` | `/ai/ingest` | **全量重建**：清空向量库 → 加载 `classpath:docs/**/*` 全部文档 |
-| `POST` | `/ai/ingestAll` | `/ai/ingest` 别名 |
+| `POST` | `/ai/ingest` | **全量重建**：清空向量库 → 加载 `classpath:docs/**/*` 全部文档（别名 `/ai/ingestAll`） |
 | `POST` | `/ai/ingest/{versionId}` | **单版本发布入库**：只删除该文档历史向量 → 切片入库（增量） |
 
-**`POST /ai/chat` / `/ai/agent-chat` / `/ai/react-agent-chat` 共用请求体**：
+**`POST /ai/chat` / `/ai/agent-chat` / `/ai/react-agent-chat` / `/ai/plan-chat` / `/ai/compare-chat` 共用请求体**：
 ```json
 {
   "question": "mv-003 近 30 天能耗按月汇总",
@@ -563,12 +651,15 @@ spring:
 | `POST` | `/{documentId}/update` | 更新文档 → 自动新版本号 vN+1 |
 | `POST` | `/versions/{versionId}/publish` | **发布**：DRAFT/ARCHIVED → ACTIVE，**自动切 `/ai/ingest/{id}` 入库向量** + 清理旧向量 |
 | `POST` | `/versions/{versionId}/archive` | 归档：ACTIVE → ARCHIVED |
+| `POST` | `/versions/{versionId}/add-to-kb` | **加入知识库**：对该版本重新切分 + 向量化，替换该文档旧向量 |
+| `POST` | `/ingest-all` | **重建整个知识库**：清空向量库 → 重读 `classpath:docs` + 所有 ACTIVE 版本文档 |
 | `DELETE` | `/{documentId}` | 删文档（所有版本 + 向量全清） |
 | `DELETE` | `/versions/{versionId}` | 删单版本（ACTIVE 同步清向量） |
 | `GET`  | `/list[?status=ACTIVE]` | 列表过滤 DRAFT/ACTIVE/ARCHIVED |
 | `GET`  | `/search?keyword=账单` | 文档名模糊搜索 |
 | `GET`  | `/{documentId}` | 最新版本详情 |
 | `GET`  | `/{documentId}/versions` | 完整版本历史 |
+| `GET`  | `/{documentId}/versions/{version}` | 指定版本详情 |
 
 ### ③ Agent 决策链路审计 & 影子路由统计
 
@@ -579,13 +670,22 @@ spring:
 | `GET` | `/api/agent/traces/stats` | 调用量 / 成功率 / 平均耗时统计 |
 | `GET` | `/api/agent/traces/shadow-stats` | **影子路由统计**：7 类判定占比 / 一致率 / 分歧详情 |
 
+### ④ 认证（`/api/auth/**`）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/auth/login?username=&password=` | 登录，返回 Basic Auth token + SessionId |
+| `POST` | `/api/auth/logout` | 注销当前 Session |
+| `GET`  | `/api/auth/status` | 查询当前登录状态与认证开关 |
+
 ---
 
 ## 🧩 内置工具清单
 
-工具定义在 `DeviceTools.java`，6 个方法全部通过 `@Tool` + `@ToolParam` 标准注解声明：
+`DeviceTools.java` 共 **8 个** 方法，全部通过 `@Tool` + `@ToolParam` 标准注解声明：
 - 走原生 Tool Calling：Spring AI 2.0 `ChatClient.tools()` 自动注册
-- 走 ReAct 模式：`ToolCatalog.renderForPrompt()` 生成工具清单嵌入系统提示词
+- 走 ReAct / Plan 模式：`ToolCatalog.renderForPrompt()` 生成工具清单嵌入系统提示词
+- 启发式 FORCE_EXEC：`SpringAiToolRegistry` 按名字反射调用
 
 | 工具名 | 参数 | 典型用户问句 |
 |--------|------|-------------|
@@ -595,6 +695,8 @@ spring:
 | `query_energy_by_days` | `sn, days` | "mv-003 近 30 天能耗趋势"、"最近 7 天的电量" |
 | `query_energy_by_date_range` | `sn, startDate, endDate` | "2026-01-01 到 2026-03-31 mv-005 的能耗" |
 | `aggregate_energy` | `sn, granularity`（day/week/month/quarter/year） | "mv-003 能耗按月汇总"、"按季度做同比环比" |
+| `getCurrentTime` | `timezone?` | "现在几点了"、"UTC 时间" |
+| `get_weather` | `city` | "北京今天天气怎么样" |
 
 ---
 
@@ -604,11 +706,13 @@ spring:
 |------------|------|------|
 | `不支持发行版本 21` | 命令行 JAVA_HOME 还是 JDK 17 | IDEA Terminal 里跑 mvn，或改系统环境变量 |
 | `Unable to determine Dialect without JDBC metadata` | Hibernate 7.2 不再自动猜方言 | `application-db.yml` 已内置 `hibernate.dialect: H2Dialect` |
-| `HTTP 404 model "mxbai-embed-large" not found` | 框架默认 embedding 模型名 | `ollama pull nomic-embed-text` 或 `bge-m3` + 配 `spring.ai.ollama.embedding.options.model` |
-| 模型把 JSON 数组当最终答案返回（显示 `[}]` 三个字符） | 小模型把工具调用写成文本，没走原生通道 | AgentAppService 已有 `TextToolCallParser` 兜底；切 qwen3.7-flash 这类支持 function calling 的更佳 |
+| `HTTP 404 model "mxbai-embed-large" not found` | 框架默认 embedding 模型名 | `ollama pull bge-m3` 或 `nomic-embed-text` + 配 `spring.ai.ollama.embedding.options.model` |
+| 登录接口 401 / 页面提示未认证 | 默认账号密码被改 / 认证开关打开 | 用 `AUTH_USERNAME` / `AUTH_PASSWORD` / `AUTH_ENABLED` 环境变量控制 |
+| 模型把 JSON 数组当最终答案返回（显示 `[}]` 三个字符） | 小模型把工具调用写成文本，没走原生通道 | AgentAppService 已有 `TextToolCallParser` 兜底；切 qwen3.7-plus 这类支持 function calling 的更佳 |
+| Plan 模式执行停滞 / 全部步骤标失败 | Planner 产出了循环依赖或引用了不存在的步骤 | 日志搜 `📋 Plan 执行停滞`，已安全降级为标记失败；换更强模型规划 |
 | "mv-003呢" 查能耗，下一条"你是什么模型"还在调能耗 | 老版本 `HeuristicRouter` 误判 | 已修复：TOPIC_SWITCH_CHAT_PATTERN + 追问剥除残长判定 + 闲聊前置短路 |
-| Query 改写永远"超时回退" | 改写后端用了 qwen3.7-flash 这种推理模型，先思考撞 3s 超时 | 改成 `rag.query-rewrite.model=qwen-turbo` 非推理模型，实测 0.47s |
-| 改了 chunk-size/overlap 但检索效果没变 | 只改了配置没重新入库 | 跑一次 `POST /ai/ingest` 全量重建向量库 |
+| Query 改写永远"超时回退" | 改写后端用了推理模型，先思考撞超时 | 配非推理模型 + 调大 `rag.query-rewrite.timeout-ms` |
+| 改了 chunk-size/overlap 但检索效果没变 | 只改了配置没重新入库 | 跑一次 `POST /api/docs/ingest-all` 全量重建向量库 |
 | 打开影子路由后延迟翻倍 | 每次请求多了一次 LLM 调用（异步但耗资源） | 验证完关掉 `agent.heuristic.shadow.enabled=false`，或调大 `sample-every` 做抽样 |
 | 纯 RAG 模式下多轮改写永远拿不到上下文 | 改造前 RAG 链路漏写会话历史 | 现已修复：`RagAppService.finish()` 会写会话历史 |
 | `.well-known/appspecific/com.chrome.devtools.json` WARN | Chrome 自动探测端点 | 已按 WARN 单列处理，可忽略 |
@@ -622,9 +726,9 @@ spring:
 | 向量库升级 PGVector / Milvus / RedisSearch | `VectorStorePort` 新增实现 | 配置里替换 `@Primary` Bean 即可，Rag/Ingest 代码零改动 |
 | OCR 扫描件 / 图片入库 | `DocumentReaderPort` 扩展 OCR Adapter | Tika 基础已就绪，加 PaddleOCR / 阿里云 OCR 包装一层 |
 | 熔断限流缓存 | 加 Resilience4j + Redis AOP | LLM 调用、能耗查询都是高延迟外部 IO，适合加缓存 1min |
-| MCP 协议对接外部系统工具 | `ToolRegistryPort` → 包 MCP ToolServer | DeviceTools 6 个方法直接暴露成 MCP Server 端点 |
+| MCP 协议对接外部系统工具 | `ToolRegistryPort` → 包 MCP ToolServer | DeviceTools 8 个方法直接暴露成 MCP Server 端点 |
 | Small-to-Big 父文档召回 | `ChunkMetaKeys.PARENT_ID` 已预埋 | RagAppService 返回 TopK 后批量查 parentId 对应全文，替换子 chunk |
-| Rerank 重排 | RagAppService 融合排序之后加一步 | 接 DashScope text-rerank-v1 或 bge-reranker，TopK*5 → Top3 |
+| Rerank 重排 | RagAppService 融合排序之后加一步 | 接 DashScope text-rerank-v1 或 bge-reranker，TopK*2 → Top3 |
 | BM25 / RRF 替换自定义关键词检索 | 升级到 Spring AI 2.0 M3+ 后替换 `RagAppService.hybridSearch()` | `pom.xml` 已引 `spring-ai-rag` 做预留，接口层零改动 |
 
 ---
