@@ -12,7 +12,13 @@ agent:
   # 现由 TracingToolCallback + ToolCallBudget 在装饰器层按本值真正强制执行。
   max-tool-calls: ${AGENT_MAX_TOOL_CALLS:5}
   # 每个会话最多带入多少轮历史对话（同时也是单会话在内存里保留的轮次上限）
-  memory-size: ${AGENT_MEMORY_SIZE:20}
+  memory-size: ${AGENT_MEMORY_SIZE:3}
+
+  # === 滚动摘要：窗口裁剪前把将被挤出的旧轮次压缩成要点，避免"总结整个会话"遗漏早期内容 ===
+  # 复用 Query 改写的轻量后端（queryRewriteLlmPort），失败/超时静默回退为纯窗口模式
+  memory-summary:
+    enabled: ${AGENT_MEMORY_SUMMARY_ENABLED:true}
+    max-prompt-chars: ${AGENT_SUMMARY_MAX_PROMPT:6000}   # 单次摘要喂给 LLM 的最大字符数
 
   # 会话清理：原先 clearExpired() 没有任何调用方，会话只增不减。
   # 现在由 @Scheduled 按 session-cleanup-interval-ms 触发，按最后访问时间淘汰。

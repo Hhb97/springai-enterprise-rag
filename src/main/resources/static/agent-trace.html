@@ -991,6 +991,42 @@
                 </div>
             </div>
         </div>
+        <div class="panel" style="margin-top: 20px;">
+            <div class="panel-header">
+                <h3>💬 会话历史窗口</h3>
+                <span class="count-badge" id="sessionHistCount">0</span>
+                <button class="btn btn-primary" style="margin-left:auto; padding:6px 14px; font-size:13px;"
+                        onclick="loadSessionHistories()">
+                    <span>🔄</span> 刷新历史
+                </button>
+            </div>
+            <div style="padding:8px 20px 0; font-size:12px; color:var(--text-muted);">
+                每个会话当前窗口内实际存储的问答对——即模型下次请求能带上的上下文。配合下方"滚动摘要"可看到完整记忆构成。
+            </div>
+            <div class="panel-body" id="sessionHistList">
+                <div class="empty-state">
+                    <div class="icon">⌛</div>
+                    <p>正在加载会话历史...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel" style="margin-top: 20px;">
+            <div class="panel-header">
+                <h3>🧠 会话滚动摘要</h3>
+                <span class="count-badge" id="summaryCount">0</span>
+                <button class="btn btn-primary" style="margin-left:auto; padding:6px 14px; font-size:13px;"
+                        onclick="loadSummaries()">
+                    <span>🔄</span> 刷新摘要
+                </button>
+            </div>
+            <div class="panel-body" id="summaryList">
+                <div class="empty-state">
+                    <div class="icon">⌛</div>
+                    <p>正在加载会话摘要...</p>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- 登录弹窗 -->
@@ -1402,6 +1438,139 @@
             return div.innerHTML;
         }
 
+        // ===== 会话历史窗口 =====
+        let sessionHistOpenSet = new Set();
+
+        async function loadSessionHistories() {
+            const box = document.getElementById('sessionHistList');
+            try {
+                const res = await authFetch('/api/agent/traces/memory-sessions');
+                const body = await res.json();
+                if (!body.success) {
+                    box.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>${escapeHtml(body.message || '加载失败')}</p></div>`;
+                    return;
+                }
+                const data = body.data;
+                document.getElementById('sessionHistCount').textContent =
+                    `${data.count} 个会话 · 窗口 ${data.windowTurns} 轮`;
+
+                if (data.count === 0) {
+                    box.innerHTML = `
+                        <div class="empty-state">
+                            <div class="icon">📭</div>
+                            <p>当前没有任何存活会话<br>
+                            <span style="font-size:12px; color:#94a3b8;">去聊天页发一条消息后回来刷新</span></p>
+                        </div>`;
+                    return;
+                }
+
+                box.innerHTML = data.sessions.map(s => {
+                    const open = sessionHistOpenSet.has(s.sessionId);
+                    const turns = (s.turns || []).map((t, i) => `
+                        <div style="margin-bottom:10px;">
+                            <div style="display:flex; gap:8px; margin-bottom:4px;">
+                                <span style="flex-shrink:0; background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:1px 8px; font-size:12px; color:var(--text-secondary);">Q${i + 1}</span>
+                                <div style="font-size:13px; color:var(--text-primary); white-space:pre-wrap; word-break:break-word;">${escapeHtml(t[0]) || '<i style="color:var(--text-muted);">(空)</i>'}</div>
+                            </div>
+                            <div style="display:flex; gap:8px;">
+                                <span style="flex-shrink:0; background:rgba(79,70,229,0.08); border:1px solid rgba(79,70,229,0.2); border-radius:6px; padding:1px 8px; font-size:12px; color:var(--accent);">A${i + 1}</span>
+                                <div style="font-size:13px; color:var(--text-secondary); white-space:pre-wrap; word-break:break-word; max-height:120px; overflow:auto;">${escapeHtml(t[1])}</div>
+                            </div>
+                        </div>`).join('');
+                    return `
+                        <div style="border:1px solid var(--border); border-radius:10px; margin-bottom:10px; overflow:hidden; background:var(--surface);">
+                            <div onclick="toggleSessionHist('${escapeHtml(s.sessionId)}')"
+                                 style="display:flex; align-items:center; gap:10px; padding:12px 16px; cursor:pointer; user-select:none;"
+                                 onmouseover="this.style.background='var(--surface-2)'"
+                                 onmouseout="this.style.background=''">
+                                <span style="transition:transform .2s; display:inline-block; transform:rotate(${open ? '90deg' : '0'});">▶</span>
+                                <strong style="font-size:14px;">${escapeHtml(s.sessionId)}</strong>
+                                ${s.hasSummary ? '<span style="background:rgba(245,158,11,0.15); color:#b45309; border-radius:6px; padding:1px 8px; font-size:12px;">🧠 含摘要</span>' : ''}
+                                <span style="margin-left:auto; font-size:12px; color:var(--text-muted);">${s.turnCount} 轮</span>
+                            </div>
+                            <div id="sessionhist-body-${escapeHtml(s.sessionId)}" style="display:${open ? 'block' : 'none'};
+                                        padding:12px 16px 14px 42px; border-top:1px dashed var(--border);">
+                                ${turns || '<p style="color:var(--text-muted); font-size:13px;">窗口内暂无完整问答对</p>'}
+                            </div>
+                        </div>`;
+                }).join('');
+            } catch (e) {
+                box.innerHTML = `<div class="empty-state"><div class="icon">❌</div><p>加载失败: ${escapeHtml(e.message)}</p></div>`;
+            }
+        }
+
+        function toggleSessionHist(sid) {
+            if (sessionHistOpenSet.has(sid)) sessionHistOpenSet.delete(sid);
+            else sessionHistOpenSet.add(sid);
+            loadSessionHistories();
+        }
+
+        // ===== 会话滚动摘要 =====
+        let summaryOpenSet = new Set();
+
+        async function loadSummaries() {
+            const box = document.getElementById('summaryList');
+            try {
+                const res = await authFetch('/api/agent/traces/memory-summaries');
+                const body = await res.json();
+                if (!body.success) {
+                    box.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>${escapeHtml(body.message || '加载失败')}</p></div>`;
+                    return;
+                }
+                const data = body.data;
+                const summaries = data.summaries || {};
+                document.getElementById('summaryCount').textContent =
+                    `${data.count} 个会话 · 窗口 ${data.windowTurns} 轮`;
+
+                if (data.count === 0) {
+                    box.innerHTML = `
+                        <div class="empty-state">
+                            <div class="icon">📭</div>
+                            <p>当前没有滚动摘要<br>
+                            <span style="font-size:12px; color:#94a3b8;">
+                              同一会话连续问答超过 ${data.windowTurns} 轮后，最旧轮次会自动压缩成摘要出现在这里
+                            </span></p>
+                        </div>`;
+                    return;
+                }
+
+                box.innerHTML = Object.entries(summaries).map(([sid, text]) => {
+                    const open = summaryOpenSet.has(sid);
+                    return `
+                        <div style="border:1px solid var(--border); border-radius:10px; margin-bottom:10px; overflow:hidden; background:var(--surface);">
+                            <div onclick="toggleSummary('${escapeHtml(sid)}')"
+                                 style="display:flex; align-items:center; gap:10px; padding:12px 16px; cursor:pointer; user-select:none;"
+                                 onmouseover="this.style.background='var(--surface-2)'"
+                                 onmouseout="this.style.background=''">
+                                <span style="transition:transform .2s; display:inline-block; transform:rotate(${open ? '90deg' : '0'});">▶</span>
+                                <strong style="font-size:14px;">${escapeHtml(sid)}</strong>
+                                <span style="margin-left:auto; font-size:12px; color:var(--text-muted);">${text.length} 字</span>
+                            </div>
+                            <div id="summary-body-${escapeHtml(sid)}" style="display:${open ? 'block' : 'none'};
+                                        padding:4px 16px 14px 42px; font-size:13px; line-height:1.8;
+                                        color:var(--text-secondary); white-space:pre-wrap; word-break:break-word;
+                                        border-top:1px dashed var(--border); padding-top:12px;">${escapeHtml(text)}</div>
+                        </div>`;
+                }).join('');
+            } catch (e) {
+                box.innerHTML = `<div class="empty-state"><div class="icon">❌</div><p>加载失败: ${escapeHtml(e.message)}</p></div>`;
+            }
+        }
+
+        function toggleSummary(sid) {
+            const body = document.getElementById('summary-body-' + sid);
+            if (!body) return;
+            const open = summaryOpenSet.has(sid);
+            if (open) {
+                summaryOpenSet.delete(sid);
+                body.style.display = 'none';
+            } else {
+                summaryOpenSet.add(sid);
+                body.style.display = 'block';
+            }
+            loadSummaries();  // 重渲染以更新箭头方向（展开状态保留）
+        }
+
         document.getElementById('searchSession').addEventListener('input', renderSessionList);
         document.getElementById('limitSel').addEventListener('change', loadRecent);
 
@@ -1410,6 +1579,8 @@
             if (authenticated) {
                 loadStats();
                 loadRecent();
+                loadSummaries();
+                loadSessionHistories();
             }
         });
     </script>
