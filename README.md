@@ -11,8 +11,8 @@
 | **🧠 RAG 混合检索** | 向量检索 + 关键词检索线性加权融合 | 权重：向量 0.7 / 关键词 0.3；6 组业务同义词扩展（账单↔计费等）+ 中文 N-gram 滑窗分词；标题 headingPath 额外加权；**向量层全低于阈值时关键词层不许单独救回**；**检索为空直接返回不调 LLM** |
 | **✂️ 语义切分** | Markdown 结构感知 + 四级分隔符递归降级 | `OverlappingTextSplitter` 按段落→换行→句末→字符逐级切分；`MarkdownSectionParser` 保留完整标题路径 `A > B > C`；Chunk 正文可前置章节前缀注入 embedding |
 | **🔁 查询改写** | 多轮省略式问题还原（独立 LLM 后端） | 默认 Ollama `qwen3.7-plus`（10s 超时守护，可独立走 DashScope）；改写结果**仅用于检索，不污染对话历史**；改写关闭时退回启发式历史拼接；**纯 RAG 链路写入会话历史，改写可拿到上下文** |
-| **🤖 原生 Tool Calling** | Spring AI 2.0 `ChatClient.tools()` 官方循环 | `@Tool` 注解自动注册 8 个工具（设备/能耗/时间/天气）；框架内部最多 5 轮循环；附带 **TextToolCallParser** 兜底识别模型把调用写成文本 JSON 的场景 |
-| **🧠 手动 ReAct 循环** | Thought → Action → Observation 全流程 | `ReActAgentAppService` 手写 ReAct 循环；每一步严格 JSON 格式解析；支持 **SSE 流式推送**（step_start → thought_delta → action_start → final_delta → done） |
+| **🤖 原生 Tool Calling** | Spring AI 2.0 官方 Tool Calling 循环（`ToolCallingAdvisor` 自动执行） | `@Tool` 注解自动注册 8 个工具（设备/能耗/时间/天气）；工具调用次数上限经 `TracingToolCallback + ToolCallBudget` **真正强制执行**（`agent.max-tool-calls`，2.0.0 GA 尚无官方 limits）；附带 **TextToolCallParser** 兜底识别模型把调用写成文本 JSON 的场景 |
+| **🧠 手动 ReAct 循环** | Thought → Action → Observation 全流程 | `ReActAgentAppService` 手写 ReAct 循环；每一步严格 JSON 格式解析；支持 **SSE 流式推送**（step_start → thought_delta → action_start → final_delta → done），端点直接返回 `Flux<ServerSentEvent>` |
 | **📋 Plan-then-Execute** | 先规划 → 并行执行 → 一次综合 | `PlanThenExecuteAppService` 三个阶段：Planner 一次产出完整计划（ReWOO `$N` 占位符引用后续步骤产物）→ Executor 拓扑调度、无依赖步骤并行 → Solver 一次 LLM 综合全部 Observation；普通版 + SSE 流式双入口 |
 | **🔀 对比模式** | Agent vs ReAct 同请求双跑 | `POST /ai/compare-chat` 一份请求同时跑两条链路，返回 agent / react 两份完整结果（answer、sources、steps、elapsedMs），用于效果评估 |
 | **⚡ 启发式路由** | FORCE_EXEC / RECOMMEND_LLM 双策略 | 列出设备、近 N 天能耗等高频纯工具场景，FORCE_EXEC 直接跳检索跳 LLM；**领域实词与追问标记分离判定，防止"如何创建用户呢"被误判为同话题** |
@@ -56,7 +56,8 @@ src/main/java/com/example/ragassitant/
 │   │   ├── IngestAppService            # 文件分派 → 切分 → 向量入库（全量/单文档增量）
 │   │   ├── DocumentAppService          # 文档版本状态机 + 发布时向量清理
 │   │   ├── QueryRewriteService         # 多轮省略问句改写 + 超时降级 + 长度门禁
-│   │   └── ShadowToolRouter            # 影子路由：LLM vs 正则异步比对，7 类判定
+│   │   ├── ShadowToolRouter            # 影子路由：LLM vs 正则异步比对，7 类判定
+│   │   └── StreamChannel               # SSE 流式通道：Sinks.Many 封装，Controller 直接返回 Flux
 │   └── controller/
 │       └── AuthController.java         # /api/auth/login|logout|status + 根路径重定向
 │
@@ -74,12 +75,14 @@ src/main/java/com/example/ragassitant/
 │   ├── llm/        SpringAiChatAdapter        # ChatClient + 自动 Tool Calling（@Primary）
 │   ├── vector/     SpringAiSimpleVectorAdapter  # deleteAll / deleteByDocId 增量清理
 │   ├── tsdb/       InfluxDB18TimeSeriesAdapter  # 内置 8 台演示设备 + 按日聚合查询 + 模拟数据回退
-│   ├── session/    InMemoryConversationStore    # 多轮会话记忆 + TTL 定时清理（@Scheduled）
+│   ├── session/    SpringAiConversationStore   # 官方 ChatMemory（MessageWindowChatMemory）+ TTL 定时清理（@Scheduled）
+│   │                                        # InMemoryConversationStore 为旧手搓实现，仅留作对照/测试，未注册 Bean
 │   ├── agent/
 │   │   ├── DeviceTools.java             # 8 个 @Tool 方法（设备/能耗/时间/天气）
 │   │   ├── ToolCatalog.java             # 工具清单唯一真相源（ReAct / Plan / 影子路由提示词用）
 │   │   ├── SpringAiToolRegistry.java    # ToolRegistryPort 实现（反射调用 + 参数校验）
-│   │   └── TracingToolCallback.java     # 原生 Tool Calling 触发时打 trace
+│   │   ├── TracingToolCallback.java     # 原生 Tool Calling 触发时打 trace + 扣减调用预算
+│   │   └── ToolCallBudget.java          # 工具调用次数硬上限（2.0.0 GA 无官方 limits 的替代实现）
 │   ├── reader/     SpringAiDocumentReader       # md/pdf/word/excel；MarkdownSectionParser + OverlappingTextSplitter
 │   ├── config/     LlmBackendConfig（双后端 + 改写独立后端 + 配置总览打印）/
 │   │               VectorStoreInfraConfig / AgentProperties / AuthProperties / DomainServiceConfig
@@ -111,7 +114,7 @@ src/main/java/com/example/ragassitant/
 
 | 模式 | 实现类 | 循环方式 | 适用模型 | 流式输出 |
 |------|-------|---------|---------|---------|
-| **Spring AI 原生 Tool Calling** | `AgentAppService` | `ChatClient.tools()` 框架内部循环 | 支持 function calling：qwen3.7-plus / gpt-4o-mini 等 | ❌ 返回最终结果 |
+| **Spring AI 原生 Tool Calling** | `AgentAppService` | `ChatClient` + `ToolCallingAdvisor` 框架内部循环（次数受 `ToolCallBudget` 硬限制） | 支持 function calling：qwen3.7-plus / gpt-4o-mini 等 | ❌ 返回最终结果 |
 | **手动 ReAct 循环** | `ReActAgentAppService` | 手写 `for (step 1..maxSteps)` + 严格 JSON 解析 | 不支持 function calling 的小模型：qwen2.5:1.5b 等 | ✅ SSE 逐 thought/action 推送 |
 | **Plan-then-Execute** | `PlanThenExecuteAppService` | Planner 一次规划 → Executor 并行执行 → Solver 一次综合 | 中等模型以上效果更佳（需要一次产出多步计划） | ✅ SSE 逐步骤 + 最终 token 流式 |
 | **对比模式** | 后端 `compareChat` 双跑 | 同请求并行调 `AgentAppService` + `ReActAgentAppService` | 任意 | ❌ 返回两者完整 JSON |
@@ -357,11 +360,11 @@ LLM 生成最终回答 + SourceDoc 返回前端
         │
         ├─ RECOMMEND_LLM 命中：把工具建议附到提示词末尾，LLM 拍板
         │
-        └─ Spring AI 2.0 ChatClient.tools(DeviceTools @Tool ×8)
-              · LLM 通过原生 tool_calls 通道识别
-              · TracingToolCallback 打 trace
-              · 最多 5 轮直到最终纯文本回答
-              · 兜底：模型把调用写成文本 JSON → TextToolCallParser 补执行
+         └─ Spring AI 2.0 ChatClient + 8 个 @Tool 工具
+               · LLM 通过原生 tool_calls 通道识别
+               · TracingToolCallback 打 trace + 扣减 ToolCallBudget 预算
+               · agent.max-tool-calls 为硬上限：耗尽即中断循环（不再只是打日志）
+               · 兜底：模型把调用写成文本 JSON → TextToolCallParser 补执行
    │
    ▼
 统一 finish()：FINAL trace → 会话历史持久化 → 响应返回
@@ -536,8 +539,10 @@ docker compose down
 
 ```yaml
 agent:
-  max-tool-calls: ${AGENT_MAX_TOOL_CALLS:5}     # 原生 Tool Calling 最大轮次 / ReAct 最大 step 数 / Plan 最大波次
-  memory-size: ${AGENT_MEMORY_SIZE:20}          # 每个会话最多带入多少轮历史
+  max-tool-calls: ${AGENT_MAX_TOOL_CALLS:5}     # 原生 Tool Calling 最大工具次数 / ReAct 最大 step 数 / Plan 最大波次
+                                                # 【已真正生效】经 TracingToolCallback + ToolCallBudget 强制执行
+                                                # （2.0.0 GA 的 DefaultToolCallingManager 尚无官方 limits，后续版本可平滑切换）
+  memory-size: ${AGENT_MEMORY_SIZE:20}          # 每个会话最多带入多少轮历史（官方 MessageWindowChatMemory 窗口 = 本值 × 2 条消息）
   session-ttl-minutes: ${AGENT_SESSION_TTL_MIN:120}   # 会话内存保留时长
   max-sessions: ${AGENT_MAX_SESSIONS:500}       # 最多同时保留会话数
   session-cleanup-interval-ms: 600000           # 定时清理周期（默认 10 分钟，@Scheduled 触发）
@@ -632,9 +637,9 @@ auth:
 | `POST` | `/ai/chat` | 纯 RAG 问答，不带 Agent；**空检索直接返回不调 LLM** |
 | `POST` | `/ai/agent-chat` | Agent 模式：三路编排 + 启发式路由 + 混合检索 + 多轮记忆 |
 | `POST` | `/ai/react-agent-chat` | ReAct 模式：手写 Thought-Action-Observation 循环，返回 JSON（含 step 详情） |
-| `POST` | `/ai/react-agent-chat-stream` | **ReAct SSE 流式**：step_start → thought_delta → action_start → final_delta → done |
+| `POST` | `/ai/react-agent-chat-stream` | **ReAct SSE 流式**：step_start → thought_delta → action_start → final_delta → done；端点返回 `Flux<ServerSentEvent>`（Spring MVC 原生支持 Reactor 返回值，无需 WebFlux） |
 | `POST` | `/ai/plan-chat` | **Plan-then-Execute 普通版**：返回计划步骤 + 执行步骤 + Solver 综合答案 |
-| `POST` | `/ai/plan-chat-stream` | **Plan SSE 流式**：step_start → thought_end → action_start → action_end → solve_start → final_delta → done |
+| `POST` | `/ai/plan-chat-stream` | **Plan SSE 流式**：step_start → thought_end → action_start → action_end → solve_start → final_delta → done；同样返回 `Flux<ServerSentEvent>` |
 | `POST` | `/ai/compare-chat` | **对比模式**：同请求跑 Agent + ReAct 两条链路，返回 agent/react 两份完整结果 |
 | `POST` | `/ai/ingest` | **全量重建**：清空向量库 → 加载 `classpath:docs/**/*` 全部文档（别名 `/ai/ingestAll`） |
 | `POST` | `/ai/ingest/{versionId}` | **单版本入库**：只删除该文档历史向量 → 切片入库（增量） |
@@ -718,6 +723,8 @@ auth:
 | `HTTP 404 model "mxbai-embed-large" not found` | 框架默认 embedding 模型名 | `ollama pull bge-m3` 或 `nomic-embed-text` + 配 `spring.ai.ollama.embedding.options.model` |
 | IAM 权限 / 登录接口 401 / 页面提示未认证 | 默认账号密码被改 / 认证开关打开 | 用 `AUTH_USERNAME` / `AUTH_PASSWORD` / `AUTH_ENABLED` 环境变量控制 |
 | 模型把 JSON 数组当最终答案返回（显示 `[}]` 三个字符） | 小模型把工具调用写成文本，没走原生通道 | AgentAppService 已有 `TextToolCallParser` 兜底；切 qwen3.7-plus 这类支持 function calling 的更佳 |
+| Agent 反复调用工具停不下来 / 工具费用失控 | 旧版 `agent.max-tool-calls` 只打日志、从未真正限制循环 | 已修复：`TracingToolCallback + ToolCallBudget` 按配置硬性扣减，耗尽即中断循环并返回提示（升级到含官方 limits 的版本后可换 `spring.ai.tools.limits.*`） |
+| 多副本部署时会话上下文丢失 | 会话记忆当前为进程内 `InMemoryChatMemoryRepository` | 把 `SpringAiConversationStore` 构造里的 Repository 换成官方 `JdbcChatMemoryRepository` 即可，其余代码零改动 |
 | Plan 模式执行停滞 / 全部步骤标失败 | Planner 产出了循环依赖或引用了不存在的步骤 | 日志搜 `⚠️ Plan 执行停滞`，已安全降级为标记失败；换更强模型规划 |
 | "mv-003呢" 查能耗，下一条"你是什么模型"还在调能耗 | 老版本 `HeuristicRouter` 误判 | 已修复：TOPIC_SWITCH_CHAT_PATTERN + 追问剥除残长判定 + 闲聊前置短路 |
 | Query 改写永远"超时回退" | 改写后端用了推理模型，先思考撞超时 | 配非推理模型 + 调大 `rag.query-rewrite.timeout-ms` |
@@ -735,6 +742,7 @@ auth:
 | 方向 | 切入点 | 说明 |
 |------|--------|------|
 | 向量库升级 PGVector / Milvus / RedisSearch | `VectorStorePort` 新增实现 | 配置里替换 `@Primary` Bean 即可，Rag/Ingest 代码零改动 |
+| 会话记忆持久化 / 多副本共享 | `SpringAiConversationStore` 换 `JdbcChatMemoryRepository` | 官方 ChatMemory Repository 抽象，H2/MySQL/PG 方言齐备；TTL/容量淘汰逻辑无需改动 |
 | OCR 扫描件 / 图片入库 | `DocumentReaderPort` 扩展 OCR Adapter | Tika 基础已就绪，加 PaddleOCR / 阿里云 OCR 包装一层 |
 | 熔断限流缓存 | 加 Resilience4j + Redis AOP | LLM 调用、能耗查询都是高延迟外部 IO，适合加缓存 1min |
 | MCP 协议对接外部系统工具 | `ToolRegistryPort` → 包 MCP ToolServer | DeviceTools 8 个方法直接暴露成 MCP Server 端点 |
