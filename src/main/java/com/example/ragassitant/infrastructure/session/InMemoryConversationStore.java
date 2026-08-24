@@ -5,7 +5,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
 
 import java.util.AbstractMap;
 import java.util.ArrayList;
@@ -24,6 +23,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * 生产环境应换成 Spring AI 的 {@code ChatMemory} + JDBC/Redis 仓库实现；
  * 端口 {@link ConversationStorePort} 已经把这层隔开，替换不影响 application 层。
  *
+ * <p><b>已被 {@link SpringAiConversationStore} 取代</b>：后者内部委托 Spring AI 2.0 官方
+ * {@code MessageWindowChatMemory + ChatMemoryRepository}，窗口裁剪/消息配对交给框架，
+ * 本类保留仅作对照参考与单元测试载体，不再注册为 Bean（去掉 @Component）。
+ *
  * <p>改造前有三个问题：
  * <ol>
  *   <li><b>用两个独立 Deque 拼问答对</b>（userMsgs / asstMsgs 各自裁剪）。一旦某轮只写入 user
@@ -37,7 +40,6 @@ import java.util.concurrent.atomic.AtomicLong;
  *       等于随机驱逐而不是淘汰最老会话。现在按最后访问时间淘汰，并由 {@code @Scheduled} 真正触发。</li>
  * </ol>
  */
-@Component
 public class InMemoryConversationStore implements ConversationStorePort {
 
     private static final Logger log = LoggerFactory.getLogger(InMemoryConversationStore.class);

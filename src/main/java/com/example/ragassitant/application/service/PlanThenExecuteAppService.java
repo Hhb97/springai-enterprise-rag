@@ -19,10 +19,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.publisher.Flux;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -37,7 +37,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -255,62 +254,33 @@ public class PlanThenExecuteAppService {
      * 按 token 流式吐（{@code solve_start → final_delta*N}），最后 {@code done} 收尾。
      * <p>事件命名与 {@link ReActAgentAppService} 完全一致，前端 {@code handleSseEvent}
      * 和 {@code renderReActSteps} 无需改逻辑即可复用。
+     * <p>返回 {@code Flux<ServerSentEvent>}（Spring MVC 原生支持，无需 WebFlux 依赖），
+     * 事件由 worker 线程经 {@link StreamChannel} 推入 Reactor Sink；客户端断连或
+     * 异步超时触发订阅取消，worker 侧自动短路退出。
      */
-    public SseEmitter chatStream(String question, String sessionId,
+    public Flux<ServerSentEvent<String>> chatStream(String question, String sessionId,
                                  boolean useRag, boolean enableHybridSearch, Integer customTopK) {
         String sess = sessionId == null ? "" : sessionId;
-        SseEmitter emitter = new SseEmitter(300_000L); // 5 分钟超时
-        AtomicBoolean finished = new AtomicBoolean(false);
-        emitter.onCompletion(() -> finished.set(true));
-        emitter.onTimeout(() -> {
-            log.warn("📋 PlanStream SSE 超时: sessionId={}", sess);
-            finished.set(true);
-        });
-        emitter.onError(e -> {
-            log.warn("📋 PlanStream SSE 错误: sessionId={}, err={}", sess, e.toString());
-            finished.set(true);
-        });
+        StreamChannel channel = StreamChannel.open();
 
         STREAM_EXECUTOR.submit(() -> {
             MDC.put(TraceIdFilter.SESSION_ID_KEY, sess);
             try {
-                runPlanStreamBlocking(emitter, finished, question, sess, useRag, enableHybridSearch, customTopK);
+                runPlanStreamBlocking(channel, question, sess, useRag, enableHybridSearch, customTopK);
             } catch (Throwable t) {
                 log.error("📋 PlanStream 执行异常", t);
-                safeEmitError(emitter, finished, t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage());
+                channel.emitError(t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage());
             } finally {
                 MDC.remove(TraceIdFilter.SESSION_ID_KEY);
-                safeEmitComplete(emitter, finished);
+                channel.complete();
             }
         });
 
-        return emitter;
-    }
-
-    private void safeEmit(SseEmitter emitter, AtomicBoolean finished, String eventName, Object data) {
-        if (finished.get()) return;
-        try {
-            emitter.send(SseEmitter.event().name(eventName).data(data));
-        } catch (IOException e) {
-            log.debug("📋 PlanStream 推送事件失败 (客户端已断开？): event={}, err={}", eventName, e.toString());
-            finished.set(true);
-        }
-    }
-
-    private void safeEmitError(SseEmitter emitter, AtomicBoolean finished, String message) {
-        if (finished.getAndSet(true)) return;
-        try {
-            emitter.send(SseEmitter.event().name("error").data(Map.of("message", message)));
-        } catch (Exception ignored) {}
-    }
-
-    private void safeEmitComplete(SseEmitter emitter, AtomicBoolean finished) {
-        if (finished.getAndSet(true)) return;
-        try { emitter.complete(); } catch (Exception ignored) {}
+        return channel.flux();
     }
 
     private void runPlanStreamBlocking(
-            SseEmitter emitter, AtomicBoolean finished,
+            StreamChannel ch,
             String question, String sessionId, boolean useRag,
             boolean enableHybridSearch, Integer customTopK) {
 
@@ -321,10 +291,10 @@ public class PlanThenExecuteAppService {
 
         // ===== 闲聊短路：和 Agent/ReAct 同一套判定 =====
         if (HeuristicRouter.isSmallTalk(question)) {
-            handleSmallTalkStream(emitter, finished, question, sessionId, totalStart);
+            handleSmallTalkStream(ch, question, sessionId, totalStart);
             return;
         }
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         // ===== Prompt Injection 安全检测 =====
         if (injectionDetector.isPromptInjection(question)) {
@@ -337,18 +307,18 @@ public class PlanThenExecuteAppService {
                     false, "prompt_injection",
                     0L, "BLOCKED", attackType);
             saveHistory(sessionId, question, rejectionMsg);
-            safeEmit(emitter, finished, "security_block", Map.of(
+            ch.emit( "security_block", Map.of(
                     "type", "prompt_injection",
                     "attackType", attackType,
                     "answer", rejectionMsg));
-            safeEmit(emitter, finished, "final_answer", Map.of("answer", rejectionMsg));
-            safeEmit(emitter, finished, "done", Map.of(
+            ch.emit( "final_answer", Map.of("answer", rejectionMsg));
+            ch.emit( "done", Map.of(
                     "answer", rejectionMsg, "sources", List.of(), "mode", "plan",
                     "totalMs", System.currentTimeMillis() - totalStart,
                     "steps", List.of(), "stepCount", 0, "sessionId", sessionId, "stream", true));
             return;
         }
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         // ===== Query 改写：只用于检索，塞给 Solver 的仍是用户原话 =====
         String retrievalQuery = question;
@@ -361,11 +331,11 @@ public class PlanThenExecuteAppService {
                 queryRewritten = !rewrittenQuery.equals(question);
                 if (queryRewritten) {
                     retrievalQuery = rewrittenQuery;
-                    safeEmit(emitter, finished, "rewrite", Map.of("from", question, "to", rewrittenQuery, "ms", 0));
+                    ch.emit( "rewrite", Map.of("from", question, "to", rewrittenQuery, "ms", 0));
                 }
             }
         }
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         // ===== RAG 检索 =====
         List<DocumentChunk> docs = new ArrayList<>();
@@ -385,13 +355,13 @@ public class PlanThenExecuteAppService {
                     sources.add(source);
                 }
                 if (!docs.isEmpty()) {
-                    safeEmit(emitter, finished, "rag_ready", Map.of("count", docs.size()));
+                    ch.emit( "rag_ready", Map.of("count", docs.size()));
                 }
             } catch (Exception e) {
                 log.warn("⚠️ PlanStream RAG 检索失败，已跳过: {}", e.getMessage());
             }
         }
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         // ===== 阶段一：Planner（静默一次生成完整计划）=====
         long planStart = System.currentTimeMillis();
@@ -412,20 +382,20 @@ public class PlanThenExecuteAppService {
                 question, plan.isEmpty() ? "no_tool_needed" : "steps=" + plan.size(),
                 false, "PLAN_THEN_EXECUTE",
                 planMs, planError == null ? "OK" : "ERROR", planError);
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         // ===== 阶段二：Executor（拓扑调度 + 无依赖步骤并行，事件逐个推送）=====
         long execStart = System.currentTimeMillis();
-        List<Map<String, Object>> stepTraces = executePlanStream(plan, sessionId, emitter, finished);
+        List<Map<String, Object>> stepTraces = executePlanStream(plan, sessionId, ch);
         long execMs = System.currentTimeMillis() - execStart;
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         // ===== 阶段三：Solver（最终答案按 token 流式吐）=====
         long solveStart = System.currentTimeMillis();
         String ragContext = buildRagContext(docs);
         String executionResults = buildExecutionResults(stepTraces);
-        String answer = streamSolver(emitter, finished, question, history, ragContext, executionResults, sessionId);
-        if (finished.get()) return;
+        String answer = streamSolver(ch, question, history, ragContext, executionResults, sessionId);
+        if (ch.isFinished()) return;
         if (answer == null || answer.isBlank()) {
             answer = "❌ Plan 综合阶段失败（LLM 返回为空）。工具执行结果可能已在上方给出。";
         }
@@ -453,7 +423,7 @@ public class PlanThenExecuteAppService {
         done.put("sessionId", sessionId);
         done.put("stream", true);
 
-        safeEmit(emitter, finished, "done", done);
+        ch.emit( "done", done);
         log.info("📋 PlanStream 完成: {} steps, plan={}ms, exec={}ms, total={}ms",
                 stepTraces.size(), planMs, execMs, totalMs);
     }
@@ -464,7 +434,7 @@ public class PlanThenExecuteAppService {
      * <p>事件在 worker 主线程（串行）发出，天然有序；工具并行执行只在 {@link #EXECUTOR} 内。
      */
     private List<Map<String, Object>> executePlanStream(List<PlanStep> plan, String sessionId,
-                                                        SseEmitter emitter, AtomicBoolean finished) {
+                                                        StreamChannel ch) {
         List<Map<String, Object>> traces = new ArrayList<>();
         if (plan == null || plan.isEmpty()) {
             traceStore.recordDecision(sessionId, 1, "PLAN_EXECUTE",
@@ -481,7 +451,7 @@ public class PlanThenExecuteAppService {
         List<PlanStep> pending = new ArrayList<>(plan);
 
         int wave = 0;
-        while (!pending.isEmpty() && wave++ <= MAX_PLAN_STEPS && !finished.get()) {
+        while (!pending.isEmpty() && wave++ <= MAX_PLAN_STEPS && !ch.isFinished()) {
             List<PlanStep> ready = pending.stream()
                     .filter(s -> s.dependsOn.stream().allMatch(done::contains))
                     .toList();
@@ -499,15 +469,15 @@ public class PlanThenExecuteAppService {
             List<CompletableFuture<Map<String, Object>>> futures = ready.stream()
                     .map(s -> {
                         // 先按顺序推事件（thought_end 的 thought 由前端渲染成步骤标题）
-                        if (finished.get()) return null;
-                        safeEmit(emitter, finished, "step_start",
+                        if (ch.isFinished()) return null;
+                        ch.emit( "step_start",
                                 Map.of("step", s.step, "maxSteps", MAX_PLAN_STEPS));
-                        safeEmit(emitter, finished, "thought_end", Map.of(
+                        ch.emit( "thought_end", Map.of(
                                 "step", s.step,
                                 "thought", "计划步骤 " + s.step + "：调用 " + s.tool,
                                 "tool", s.tool,
                                 "arguments", s.arguments == null ? Map.of() : s.arguments));
-                        safeEmit(emitter, finished, "action_start", Map.of(
+                        ch.emit( "action_start", Map.of(
                                 "step", s.step,
                                 "tool", s.tool,
                                 "arguments", s.arguments == null ? Map.of() : s.arguments));
@@ -531,7 +501,7 @@ public class PlanThenExecuteAppService {
                     end.put("durationMs", trace.get("durationMs"));
                     end.put("tool", trace.get("tool"));
                     if (trace.get("error") != null) end.put("error", trace.get("error"));
-                    safeEmit(emitter, finished, "action_end", end);
+                    ch.emit( "action_end", end);
                 } catch (Exception e) {
                     log.warn("⚠️ PlanStream 步骤执行取结果失败: {}", e.getMessage());
                     failed.add(-1);
@@ -543,10 +513,10 @@ public class PlanThenExecuteAppService {
     }
 
     /** Solver 最终答案按 token 流式推送（{@code final_delta}），本地攒全量返回。 */
-    private String streamSolver(SseEmitter emitter, AtomicBoolean finished,
+    private String streamSolver(StreamChannel ch,
                                 String question, List<Map.Entry<String, String>> history,
                                 String ragContext, String executionResults, String sessionId) {
-        safeEmit(emitter, finished, "solve_start", Map.of());
+        ch.emit( "solve_start", Map.of());
         List<MessageDTO> messages = buildSolverMessages(question, history, ragContext, executionResults);
         StringBuilder buf = new StringBuilder();
         CountDownLatch latch = new CountDownLatch(1);
@@ -554,32 +524,32 @@ public class PlanThenExecuteAppService {
         try {
             llmPort.chatStreamWithRawMessages(messages)
                     .doOnNext(token -> {
-                        if (finished.get()) return;
+                        if (ch.isFinished()) return;
                         if (token != null && !token.isEmpty()) {
                             buf.append(token);
-                            safeEmit(emitter, finished, "final_delta", Map.of("delta", token));
+                            ch.emit( "final_delta", Map.of("delta", token));
                         }
                     })
                     .doOnError(streamErr::set)
                     .doOnComplete(() -> latch.countDown())
                     .subscribe();
             boolean ok = latch.await(180, TimeUnit.SECONDS);
-            if (finished.get()) return "";
+            if (ch.isFinished()) return "";
             if (!ok || streamErr.get() != null) {
                 String msg = streamErr.get() != null ? streamErr.get().getMessage() : "Solver 流式调用超时";
                 log.warn("⚠️ PlanStream Solver 异常: {}", msg);
-                safeEmit(emitter, finished, "error", Map.of("message", msg));
+                ch.emit( "error", Map.of("message", msg));
                 return "❌ Plan 综合阶段失败: " + msg;
             }
         } catch (Exception e) {
             log.error("📋 PlanStream Solver 异常", e);
-            safeEmit(emitter, finished, "error", Map.of("message", e.getMessage()));
+            ch.emit( "error", Map.of("message", e.getMessage()));
             return "❌ Plan 综合阶段失败: " + e.getMessage();
         }
         return buf.toString().trim();
     }
 
-    private void handleSmallTalkStream(SseEmitter emitter, AtomicBoolean finished,
+    private void handleSmallTalkStream(StreamChannel ch,
                                        String question, String sessionId, long totalStart) {
         log.info("💬 PlanStream 闲聊短路：跳过 Planner/Executor/Solver → question={}", question);
         List<MessageDTO> messages = List.of(
@@ -590,10 +560,10 @@ public class PlanThenExecuteAppService {
         CountDownLatch latch = new CountDownLatch(1);
         llmPort.chatStreamWithRawMessages(messages)
                 .doOnNext(t -> {
-                    if (finished.get()) return;
+                    if (ch.isFinished()) return;
                     if (t != null && !t.isEmpty()) {
                         buf.append(t);
-                        safeEmit(emitter, finished, "final_delta", Map.of("delta", t));
+                        ch.emit( "final_delta", Map.of("delta", t));
                     }
                 })
                 .doOnComplete(() -> {
@@ -606,7 +576,7 @@ public class PlanThenExecuteAppService {
                             false, "PLAN_THEN_EXECUTE_SMALL_TALK",
                             ms, "OK", null);
                     saveHistory(sessionId, question, answer);
-                    safeEmit(emitter, finished, "done", Map.of(
+                    ch.emit( "done", Map.of(
                             "answer", answer, "sources", List.of(), "mode", "plan",
                             "totalMs", System.currentTimeMillis() - totalStart,
                             "steps", List.of(), "stepCount", 0,
@@ -621,8 +591,8 @@ public class PlanThenExecuteAppService {
                             false, "PLAN_THEN_EXECUTE_SMALL_TALK",
                             ms, "ERROR", e.getMessage());
                     saveHistory(sessionId, question, SMALL_TALK_FALLBACK);
-                    safeEmitError(emitter, finished, e.getMessage() == null ? "闲聊回复失败" : e.getMessage());
-                    safeEmit(emitter, finished, "done", Map.of(
+                    ch.emitError( e.getMessage() == null ? "闲聊回复失败" : e.getMessage());
+                    ch.emit( "done", Map.of(
                             "answer", SMALL_TALK_FALLBACK, "sources", List.of(), "mode", "plan",
                             "totalMs", System.currentTimeMillis() - totalStart,
                             "steps", List.of(), "stepCount", 0,

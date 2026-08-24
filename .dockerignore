@@ -1,0 +1,36 @@
+# ========== Docker 构建上下文白名单：减少上传体积、避免泄密 ==========
+
+# 版本控制 / IDE / 构建产物
+.git
+.gitignore
+.idea
+.vscode
+*.iml
+*.ipr
+*.iws
+target/
+build/
+out/
+
+# 本地运行产生的数据（**绝不打进镜像**，靠 volume 挂载）
+data/
+uploads/
+h2db/
+*.db
+*.mv.db
+*.trace.db
+heapdump*.hprof
+
+# 日志
+logs/
+*.log
+nohup.out
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.swp
+*~

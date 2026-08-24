@@ -2,6 +2,7 @@ package com.example.ragassitant.infrastructure.llm;
 
 import com.example.ragassitant.domain.spi.LlmPort;
 import com.example.ragassitant.domain.spi.LlmPort.MessageDTO.Role;
+import com.example.ragassitant.infrastructure.agent.ToolCallBudget;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -120,11 +121,14 @@ public class SpringAiChatAdapter implements LlmPort {
 
     @Override
     public String chatWithAutoToolCalling(List<MessageDTO> messages, int maxToolCalls, List<Object> toolBeans) {
+        // 2.0.0 GA 的 DefaultToolCallingManager 还没有官方 Tool Call Limits，
+        // 预算在 TracingToolCallback 装饰器层经 ToolCallBudget 真正强制执行：
+        // 每次原生工具执行扣一次额度，耗尽抛 IllegalStateException 中断循环。
+        ToolCallBudget.begin(maxToolCalls);
         try {
             List<Object> beans = toolBeans == null ? List.of() : toolBeans;
-            int maxCalls = maxToolCalls <= 0 ? 5 : maxToolCalls;
-            log.info("🤖[Spring AI 2.0 官方 Tool Calling] 开始：消息数={}, 最大工具轮次={}, 工具数={}",
-                    messages == null ? 0 : messages.size(), maxCalls, beans.size());
+            log.info("🤖[Spring AI 2.0 官方 Tool Calling] 开始：消息数={}, 最大工具次数={}, 工具数={}",
+                    messages == null ? 0 : messages.size(), maxToolCalls, beans.size());
 
             // Spring AI 2.0 ChatClient 内部自动完成 Agent 循环，不需要手写 for：
             //   LLM → 检测 tool_call 响应 → 反射调用 @Tool 注解方法 → 自动塞回 ToolMessage → 循环 → 出最终纯文本
@@ -156,6 +160,8 @@ public class SpringAiChatAdapter implements LlmPort {
         } catch (Exception e) {
             log.error("❌ Spring AI 2.0 官方 Tool Calling 执行失败", e);
             return null;
+        } finally {
+            ToolCallBudget.clear();
         }
     }
 

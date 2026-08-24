@@ -2,14 +2,15 @@
 # 主配置入口：通过 spring.profiles.include 聚合各职责配置文件
 #
 # 子文件一览（按加载顺序排列，同名属性后者覆盖前者）：
-#   application-server.yml   服务端口、日志格式、运维监控 Actuator
-#   application-db.yml       数据源、H2 控制台、JPA / Hibernate
-#   application-ai.yml       Spring AI：Ollama / DashScope / Embedding
-#   application-rag.yml      RAG：切分、相似度阈值、Query 改写
-#   application-agent.yml    Agent：Tool Calling、会话、启发式+影子路由
-#   application-storage.yml  文件上传目录、InfluxDB 1.x
-#   application-prompt.yml   Prompt 提示词（可热改）
-#   application-auth.yml     登录认证：开关 + 用户名密码
+#   application-server.yml    服务端口、日志格式、运维监控 Actuator
+#   application-db.yml        数据源、H2 控制台、JPA / Hibernate
+#   application-ai.yml        Spring AI：Ollama / DashScope / Embedding
+#   application-rag.yml       RAG：切分、相似度阈值、Query 改写
+#   application-agent.yml     Agent：Tool Calling、会话、启发式+影子路由
+#   application-storage.yml   文件上传目录、InfluxDB 1.x
+#   application-prompt.yml    Prompt 提示词（可热改）
+#   application-auth.yml      登录认证：开关 + 用户名密码
+#   application-websearch.yml 网页搜索工具：Tavily / SerpAPI API Key
 #
 # 注：spring.profiles.active 多环境（dev/test/prod）可与 include 叠加，
 #     如 spring.profiles.active=prod 会额外加载 application-prod.yml
@@ -29,3 +30,4 @@ spring:
       - storage       # application-storage.yml
       - prompt        # application-prompt.yml
       - auth          # application-auth.yml
+      - websearch     # application-websearch.yml

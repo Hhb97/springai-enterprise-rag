@@ -6,7 +6,10 @@
 # 没有任何代码读取；真正生效的是 AgentAppService 里硬编码的 static final 常量。
 # 而 prompt.agent.max-history 与 default-memory-size 语义完全重复，也同样没人读 —— 已合并为 memory-size。
 agent:
-  # LLM 自动 Tool Calling 的最大轮次，超过即强制出最终回答
+  # LLM 自动 Tool Calling 的最大轮次，超过即强制出最终回答。
+  # 【2.0 规范化】此前该值只在 SpringAiChatAdapter 里打日志、从未真正限制循环；
+  # 2.0.0 GA 的 DefaultToolCallingManager 尚无官方 Tool Call Limits，
+  # 现由 TracingToolCallback + ToolCallBudget 在装饰器层按本值真正强制执行。
   max-tool-calls: ${AGENT_MAX_TOOL_CALLS:5}
   # 每个会话最多带入多少轮历史对话（同时也是单会话在内存里保留的轮次上限）
   memory-size: ${AGENT_MEMORY_SIZE:20}
@@ -39,3 +42,4 @@ agent:
       # 每 N 次请求比对一次：1=每次都比，10=抽样 10%
       sample-every: ${AGENT_SHADOW_SAMPLE_EVERY:1}
       max-history-pairs: 3
+

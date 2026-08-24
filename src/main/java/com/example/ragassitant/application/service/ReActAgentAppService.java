@@ -17,16 +17,15 @@ import com.example.ragassitant.infrastructure.config.AgentProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.publisher.Flux;
 
-import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
@@ -93,63 +92,33 @@ public class ReActAgentAppService {
     /**
      * Stream 版本：ReAct 循环每一步 Thought / Action / Observation 阶段以
      * Server-Sent Events 方式分事件推送，最后 Final Answer 按字符流式吐。
-     * <p>使用 Spring MVC 原生 {@link SseEmitter}，不需要额外引入 WebFlux 依赖。
+     * <p>返回 {@code Flux<ServerSentEvent>}（Spring MVC 原生支持，无需 WebFlux 依赖），
+     * 事件由 worker 线程经 {@link StreamChannel} 推入 Reactor Sink；客户端断连或
+     * 异步超时触发订阅取消，worker 侧自动短路退出。
      */
-    public SseEmitter chatStream(String question, String sessionId,
+    public Flux<ServerSentEvent<String>> chatStream(String question, String sessionId,
                                   boolean useRag, boolean enableHybridSearch, Integer customTopK) {
         String sess = sessionId == null ? "" : sessionId;
-        SseEmitter emitter = new SseEmitter(300_000L); // 5 分钟超时
-        AtomicBoolean finished = new AtomicBoolean(false);
-        emitter.onCompletion(() -> finished.set(true));
-        emitter.onTimeout(() -> {
-            log.warn("🧠 ReActStream SSE 超时: sessionId={}", sess);
-            finished.set(true);
-        });
-        emitter.onError(e -> {
-            log.warn("🧠 ReActStream SSE 错误: sessionId={}, err={}", sess, e.toString());
-            finished.set(true);
-        });
+        StreamChannel channel = StreamChannel.open();
 
         STREAM_EXECUTOR.submit(() -> {
             MDC.put(TraceIdFilter.SESSION_ID_KEY, sess);
             try {
-                runReActLoopStreamBlocking(emitter, finished, question, sess, useRag, enableHybridSearch, customTopK);
+                runReActLoopStreamBlocking(channel, question, sess, useRag, enableHybridSearch, customTopK);
             } catch (Throwable t) {
                 log.error("🧠 ReActStream 执行异常", t);
-                safeEmitError(emitter, finished, t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage());
+                channel.emitError(t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage());
             } finally {
                 MDC.remove(TraceIdFilter.SESSION_ID_KEY);
-                safeEmitComplete(emitter, finished);
+                channel.complete();
             }
         });
 
-        return emitter;
-    }
-
-    private void safeEmit(SseEmitter emitter, AtomicBoolean finished, String eventName, Object data) {
-        if (finished.get()) return;
-        try {
-            emitter.send(SseEmitter.event().name(eventName).data(data));
-        } catch (IOException e) {
-            log.debug("🧠 ReActStream 推送事件失败 (客户端已断开？): event={}, err={}", eventName, e.toString());
-            finished.set(true);
-        }
-    }
-
-    private void safeEmitError(SseEmitter emitter, AtomicBoolean finished, String message) {
-        if (finished.getAndSet(true)) return;
-        try {
-            emitter.send(SseEmitter.event().name("error").data(Map.of("message", message)));
-        } catch (Exception ignored) {}
-    }
-
-    private void safeEmitComplete(SseEmitter emitter, AtomicBoolean finished) {
-        if (finished.getAndSet(true)) return;
-        try { emitter.complete(); } catch (Exception ignored) {}
+        return channel.flux();
     }
 
     private void runReActLoopStreamBlocking(
-            SseEmitter emitter, AtomicBoolean finished,
+            StreamChannel ch,
             String question, String sessionId, boolean useRag,
             boolean enableHybridSearch, Integer customTopK) {
 
@@ -160,10 +129,10 @@ public class ReActAgentAppService {
                 sessionId, props.getMemorySize());
 
         if (isSmallTalk(question)) {
-            handleSmallTalkStream(emitter, finished, question, sessionId);
+            handleSmallTalkStream(ch, question, sessionId);
             return;
         }
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         // ️ Prompt Injection 安全检测
         if (injectionDetector.isPromptInjection(question)) {
@@ -177,22 +146,22 @@ public class ReActAgentAppService {
                     0L, "BLOCKED", attackType);
             conversationStorePort.saveUser(sessionId, question);
             conversationStorePort.saveAssistant(sessionId, rejectionMsg);
-            safeEmit(emitter, finished, "security_block", Map.of(
+            ch.emit( "security_block", Map.of(
                     "type", "prompt_injection",
                     "attackType", attackType,
                     "answer", rejectionMsg
             ));
-            safeEmit(emitter, finished, "final_answer", Map.of("answer", rejectionMsg));
-            safeEmit(emitter, finished, "done", Map.of("durationMs", System.currentTimeMillis() - totalStart));
+            ch.emit( "final_answer", Map.of("answer", rejectionMsg));
+            ch.emit( "done", Map.of("durationMs", System.currentTimeMillis() - totalStart));
             return;
         }
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         String retrievalQuery = question;
         boolean queryRewritten = false;
         String rewrittenQuery = null;
 
-        if (!history.isEmpty() && queryRewriteService.isEnabled() && !finished.get()) {
+        if (!history.isEmpty() && queryRewriteService.isEnabled() && !ch.isFinished()) {
             long rwStart = System.currentTimeMillis();
             List<String> rewrites = queryRewriteService.rewrite(question, history, sessionId);
             long rewriteMs = System.currentTimeMillis() - rwStart;
@@ -201,18 +170,18 @@ public class ReActAgentAppService {
                 queryRewritten = !rewrittenQuery.equals(question);
                 if (queryRewritten) {
                     retrievalQuery = rewrittenQuery;
-                    safeEmit(emitter, finished, "rewrite",
+                    ch.emit( "rewrite",
                             Map.of("from", question, "to", rewrittenQuery, "ms", rewriteMs));
                 }
             }
         }
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         List<DocumentChunk> docs = new ArrayList<>();
         List<Map<String, Object>> sources = new ArrayList<>();
         String systemPrompt;
 
-        if (useRag && !finished.get()) {
+        if (useRag && !ch.isFinished()) {
             try {
                 int topK = customTopK != null ? customTopK : 5;
                 docs = ragAppService.retrieveDocuments(retrievalQuery, enableHybridSearch, topK);
@@ -227,13 +196,13 @@ public class ReActAgentAppService {
                     sources.add(source);
                 }
                 if (!docs.isEmpty()) {
-                    safeEmit(emitter, finished, "rag_ready", Map.of("count", docs.size()));
+                    ch.emit( "rag_ready", Map.of("count", docs.size()));
                 }
             } catch (Exception e) {
                 log.warn("⚠️ ReActStream RAG 检索失败，已跳过: {}", e.getMessage());
             }
         }
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         systemPrompt = promptBuilder.buildReActSystemPrompt(toolCatalog.renderForPrompt(), docs);
         List<MessageDTO> currentMessages = buildBaseMessages(history, systemPrompt);
@@ -250,9 +219,9 @@ public class ReActAgentAppService {
                 false, "REACT_MANUAL_LOOP",
                 null, "OK", null);
 
-        for (int step = 1; step <= maxSteps && !finished.get(); step++) {
+        for (int step = 1; step <= maxSteps && !ch.isFinished(); step++) {
             long stepStart = System.currentTimeMillis();
-            safeEmit(emitter, finished, "step_start", Map.of("step", step, "maxSteps", maxSteps));
+            ch.emit( "step_start", Map.of("step", step, "maxSteps", maxSteps));
             log.info("🧠 ReActStream step {} start, messages={}", step, currentMessages.size());
 
             // ===== Thought 阶段：流式逐 token 推送 thought_delta，同时在本地攒全量 =====
@@ -263,10 +232,10 @@ public class ReActAgentAppService {
                 int finalStep = step;
                 llmPort.chatStreamWithRawMessages(currentMessages)
                         .doOnNext(token -> {
-                            if (finished.get()) return;
+                            if (ch.isFinished()) return;
                             if (token != null && !token.isEmpty()) {
                                 buf.append(token);
-                                safeEmit(emitter, finished, "thought_delta",
+                                ch.emit( "thought_delta",
                                         Map.of("step", finalStep, "delta", token));
                             }
                         })
@@ -274,7 +243,7 @@ public class ReActAgentAppService {
                         .doOnComplete(() -> latch.countDown())
                         .subscribe();
                 boolean ok = latch.await(180, TimeUnit.SECONDS);
-                if (finished.get()) return;
+                if (ch.isFinished()) return;
                 if (!ok || streamErr.get() != null) {
                     String msg = streamErr.get() != null ? streamErr.get().getMessage() : "LLM 流式调用超时";
                     stepTraces.add(buildStepTrace(step, "LLM 调用出错", null, null, msg, System.currentTimeMillis() - stepStart));
@@ -284,7 +253,7 @@ public class ReActAgentAppService {
                             "Thought: LLM 调用出错",
                             false, "REACT_STEP_ERROR",
                             System.currentTimeMillis() - stepStart, "ERROR", msg);
-                    safeEmit(emitter, finished, "error", Map.of("step", step, "message", msg));
+                    ch.emit( "error", Map.of("step", step, "message", msg));
                     finalAnswer = "推理步骤 " + step + " 出错: " + msg;
                     break;
                 }
@@ -296,7 +265,7 @@ public class ReActAgentAppService {
                         "Thought: LLM 调用异常",
                         false, "REACT_STEP_ERROR",
                         System.currentTimeMillis() - stepStart, "ERROR", e.getMessage());
-                safeEmit(emitter, finished, "error", Map.of("step", step, "message", e.getMessage()));
+                ch.emit( "error", Map.of("step", step, "message", e.getMessage()));
                 finalAnswer = "推理步骤 " + step + " 出错: " + e.getMessage();
                 break;
             }
@@ -330,8 +299,8 @@ public class ReActAgentAppService {
                 thoughtEnd.put("tool", decision.toolCall().name);
                 thoughtEnd.put("arguments", decision.toolCall().arguments);
             }
-            safeEmit(emitter, finished, "thought_end", thoughtEnd);
-            if (finished.get()) return;
+            ch.emit( "thought_end", thoughtEnd);
+            if (ch.isFinished()) return;
 
             // ===== Final Answer：直接打字机逐字符流 final_delta =====
             if (decision.isFinalAnswer()) {
@@ -343,7 +312,7 @@ public class ReActAgentAppService {
                         false, "REACT_STEP_FINAL",
                         stepMs, "OK", null);
                 finalAnswer = decision.answer() == null ? "" : decision.answer();
-                streamFinalAnswer(emitter, finished, finalAnswer);
+                streamFinalAnswer(ch, finalAnswer);
                 break;
             }
 
@@ -358,15 +327,15 @@ public class ReActAgentAppService {
                 finalAnswer = (decision.answer() != null && !decision.answer().isBlank())
                         ? decision.answer()
                         : (decision.thought() != null ? decision.thought() : cleanupAnswer(llmResponse));
-                streamFinalAnswer(emitter, finished, finalAnswer);
+                streamFinalAnswer(ch, finalAnswer);
                 break;
             }
 
             // ===== Action 阶段：通知前端 loading，调工具 =====
             ToolCall tc = decision.toolCall();
-            safeEmit(emitter, finished, "action_start",
+            ch.emit( "action_start",
                     Map.of("step", step, "tool", tc.name, "arguments", tc.arguments == null ? Map.of() : tc.arguments));
-            if (finished.get()) return;
+            if (ch.isFinished()) return;
 
             long actStart = System.currentTimeMillis();
             String observation;
@@ -382,9 +351,9 @@ public class ReActAgentAppService {
             }
             long actMs = System.currentTimeMillis() - actStart;
 
-            safeEmit(emitter, finished, "action_end",
+            ch.emit( "action_end",
                     Map.of("step", step, "observation", observation, "durationMs", actMs, "tool", tc.name));
-            if (finished.get()) return;
+            if (ch.isFinished()) return;
 
             stepTraces.add(buildStepTrace(step, decision.thought(), tc, observation, null, stepMs));
             traceStore.recordDecision(sessionId, 1, "REACT_STEP",
@@ -400,7 +369,7 @@ public class ReActAgentAppService {
             currentMessages.add(new MessageDTO(Role.USER, observationPrompt));
         }
 
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         if (finalAnswer == null || finalAnswer.isBlank()) {
             finalAnswer = "已达到最大推理步数 (" + maxSteps + ")，未能得出最终答案。请尝试更具体的问题，或提供更多参数。";
@@ -410,9 +379,9 @@ public class ReActAgentAppService {
                     "已达最大步数，提前终止",
                     false, "REACT_MAX_STEPS_REACHED",
                     System.currentTimeMillis() - totalStart, "WARN", "max_steps_reached");
-            streamFinalAnswer(emitter, finished, finalAnswer);
+            streamFinalAnswer(ch, finalAnswer);
         }
-        if (finished.get()) return;
+        if (ch.isFinished()) return;
 
         conversationStorePort.saveUser(sessionId, question);
         conversationStorePort.saveAssistant(sessionId, finalAnswer);
@@ -436,7 +405,7 @@ public class ReActAgentAppService {
         done.put("sessionId", sessionId);
         done.put("stream", true);
 
-        safeEmit(emitter, finished, "done", done);
+        ch.emit( "done", done);
         log.info("🧠 ReActStream 完成: {} steps, {}ms", stepTraces.size(), totalMs);
     }
 
@@ -453,14 +422,14 @@ public class ReActAgentAppService {
     }
 
     /** Final Answer 打字机效果：按字符切片推送，前端体验和普通 RAG Stream 一致。 */
-    private void streamFinalAnswer(SseEmitter emitter, AtomicBoolean finished, String answer) {
+    private void streamFinalAnswer(StreamChannel ch, String answer) {
         if (answer == null || answer.isEmpty()) return;
-        safeEmit(emitter, finished, "final_start", Map.of("length", answer.length()));
+        ch.emit( "final_start", Map.of("length", answer.length()));
         int chunkSize = 3;
-        for (int i = 0; i < answer.length() && !finished.get(); ) {
+        for (int i = 0; i < answer.length() && !ch.isFinished(); ) {
             int end = Math.min(i + chunkSize, answer.length());
             String delta = answer.substring(i, end);
-            safeEmit(emitter, finished, "final_delta", Map.of("delta", delta));
+            ch.emit( "final_delta", Map.of("delta", delta));
             i = end;
             try {
                 TimeUnit.MILLISECONDS.sleep(8);
@@ -471,7 +440,7 @@ public class ReActAgentAppService {
         }
     }
 
-    private void handleSmallTalkStream(SseEmitter emitter, AtomicBoolean finished, String question, String sessionId) {
+    private void handleSmallTalkStream(StreamChannel ch, String question, String sessionId) {
         log.info("💬 ReActStream 闲聊短路");
         List<MessageDTO> messages = List.of(
                 new MessageDTO(Role.SYSTEM, promptBuilder.buildSmallTalkSystemPrompt()),
@@ -483,10 +452,10 @@ public class ReActAgentAppService {
         AtomicReference<String> fullReply = new AtomicReference<>();
         llmPort.chatStreamWithRawMessages(messages)
                 .doOnNext(t -> {
-                    if (finished.get()) return;
+                    if (ch.isFinished()) return;
                     if (t != null && !t.isEmpty()) {
                         buf.append(t);
-                        safeEmit(emitter, finished, "final_delta", Map.of("delta", t));
+                        ch.emit( "final_delta", Map.of("delta", t));
                     }
                 })
                 .doOnComplete(() -> {
@@ -502,7 +471,7 @@ public class ReActAgentAppService {
                             ms, "OK", null);
                     conversationStorePort.saveUser(sessionId, question);
                     conversationStorePort.saveAssistant(sessionId, answer);
-                    safeEmit(emitter, finished, "done", Map.of(
+                    ch.emit( "done", Map.of(
                             "answer", answer, "sources", List.of(), "mode", "react",
                             "totalMs", ms, "steps", List.of(), "stepCount", 0,
                             "sessionId", sessionId, "stream", true, "smallTalk", true));
@@ -518,8 +487,8 @@ public class ReActAgentAppService {
                             ms, "ERROR", e.getMessage());
                     conversationStorePort.saveUser(sessionId, question);
                     conversationStorePort.saveAssistant(sessionId, answer);
-                    safeEmitError(emitter, finished, e.getMessage() == null ? "闲聊回复失败" : e.getMessage());
-                    safeEmit(emitter, finished, "done", Map.of(
+                    ch.emitError( e.getMessage() == null ? "闲聊回复失败" : e.getMessage());
+                    ch.emit( "done", Map.of(
                             "answer", answer, "sources", List.of(), "mode", "react",
                             "totalMs", ms, "steps", List.of(), "stepCount", 0,
                             "sessionId", sessionId, "stream", true, "smallTalk", true));

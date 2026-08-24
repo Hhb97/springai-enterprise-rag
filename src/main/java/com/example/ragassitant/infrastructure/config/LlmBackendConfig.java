@@ -98,6 +98,10 @@ public class LlmBackendConfig {
         return ChatClient.builder(primaryChatModel);
     }
 
+    // 注：2.0.0 GA 的 DefaultToolCallingManager.Builder 尚未提供 maxCallsPerTool 等
+    // Tool Call Limits 配置（官方后续版本才加入），工具调用次数上限改由
+    // TracingToolCallback + ToolCallBudget 在装饰器层真正强制执行，见 infrastructure.agent 包。
+
     /**
      * Query 改写专用的 LlmPort，后端由 {@code rag.query-rewrite.backend} 独立指定。
      *

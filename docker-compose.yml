@@ -1,0 +1,83 @@
+# ============================================================
+# docker-compose.yml —— 一键启动 RAG 助手服务（DashScope 版）
+# ⚠️ 此文件含 API Key，不要提交到 git 仓库
+#
+# 使用方式：
+#   1) 改下方 DASHSCOPE_API_KEY 为你的真实 Key
+#   2) 构建启动：  docker compose up -d --build
+#   3) 看日志：    docker compose logs -f rag
+#   4) 停止：      docker compose down
+#   5) 访问：      http://localhost:8900   admin / admin123
+# ============================================================
+
+services:
+  rag:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-assistant
+    restart: unless-stopped
+    network_mode: bridge
+
+    # ============= 端口映射 =============
+    ports:
+      - "8900:8900"
+
+    # ============= 持久化卷 =============
+    volumes:
+      - ./data:/app/data            # H2 文件数据库 + heapdump
+      - ./uploads:/app/uploads      # 用户上传的原始文档
+      - ./src/main/resources/docs:/app/documents:ro   # 预置示例文档（只读）
+
+    # ============= 所有配置直接写在这里 =============
+    environment:
+      # ---- 基础 ----
+      TZ: Asia/Shanghai
+      LANG: C.UTF-8
+
+      # ---- 登录账号密码 ----
+      AUTH_ENABLED: "true"
+      AUTH_USERNAME: "admin"
+      AUTH_PASSWORD: "admin123"
+
+      # ===== LLM：阿里云百炼 DashScope（只需要改这一个 Key）=====
+      CHAT_BACKEND: "dashscope"
+      EMBED_BACKEND: "dashscope"
+      DASHSCOPE_API_KEY: "sk-your-api-key-here"
+      DASHSCOPE_CHAT_MODEL: "qwen3.7-plus"
+      DASHSCOPE_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+      # ===== Query 改写模型（快、便宜，不要用带推理的 plus 模型）=====
+      REWRITE_BACKEND: "dashscope"
+      REWRITE_MODEL: "qwen3.7-flash"
+
+      # ---- 备用：本地 Ollama（CHAT_BACKEND/EMBED_BACKEND 改成 ollama 时用）----
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      OLLAMA_CHAT_MODEL: "qwen2.5:1.5b"
+      OLLAMA_EMBED_MODEL: "bge-m3"
+
+      # ---- RAG / Agent 调优参数 ----
+      RAG_SIMILARITY_THRESHOLD: "0.40"
+      AGENT_MAX_TOOL_CALLS: "5"
+      AGENT_SESSION_TTL_MIN: "120"
+
+      # ---- JVM 额外参数（4G 内存容器默认够了，一般不用改）----
+      # JAVA_OPTS: "-XX:+UseZGC -XX:MaxRAMPercentage=75.0 -Xms1g -Xmx3g"
+
+    # ---- 资源限制 ----
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: "4.0"
+
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+    # ---- 健康检查（首次启动慢，给足 3 分钟预热）----
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8900/actuator/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 180s

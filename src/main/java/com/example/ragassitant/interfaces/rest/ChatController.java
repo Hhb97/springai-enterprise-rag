@@ -9,12 +9,13 @@ import com.example.ragassitant.interfaces.dto.request.ChatRequestDTO;
 import com.example.ragassitant.interfaces.dto.response.ChatResponseDTO;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import reactor.core.publisher.Flux;
 
 @RestController
 @RequestMapping("/ai")
@@ -181,7 +182,7 @@ public class ChatController {
      * 任何环节出错会额外发 error 事件，然后一定发 done 事件并关闭流。
      */
     @PostMapping(value = "/react-agent-chat-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter reactAgentChatStream(@RequestBody ChatRequestDTO request) {
+    public Flux<ServerSentEvent<String>> reactAgentChatStream(@RequestBody ChatRequestDTO request) {
         String sessionId = (request.getSessionId() == null || request.getSessionId().isBlank())
                 ? "react-stream-" + System.currentTimeMillis()
                 : request.getSessionId();
@@ -198,7 +199,7 @@ public class ChatController {
      *     → solve_start → final_delta*N → done
      */
     @PostMapping(value = "/plan-chat-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter planChatStream(@RequestBody ChatRequestDTO request) {
+    public Flux<ServerSentEvent<String>> planChatStream(@RequestBody ChatRequestDTO request) {
         String sessionId = (request.getSessionId() == null || request.getSessionId().isBlank())
                 ? "plan-stream-" + System.currentTimeMillis()
                 : request.getSessionId();

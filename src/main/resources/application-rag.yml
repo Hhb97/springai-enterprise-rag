@@ -51,15 +51,15 @@ rag:
     # 独立于 spring.ai.chat-backend：指代消解对 1.5b 小模型偏吃力，改写跑偏反而让检索更差；
     # 而它在问答主链路上，本地小模型还要额外付 1~3s 推理延迟。取值 dashscope / openai / ollama。
     # 目标后端不可用时自动降级到主聊天模型，不会导致启动失败。
-    backend: ${REWRITE_BACKEND:dashscope}
+    backend: ${REWRITE_BACKEND:ollama}
     # 改写模型必须和 backend 匹配。留空 = 沿用后端默认模型。
     # 【必须显式指定的原因】主对话默认的 qwen3.7-flash 是推理模型：改写「那结算周期呢」这种
     # 机械任务也会先思考一轮（实测 reasoning_tokens=145），必然撞上 3s 超时，
     # 而且思维链会混进输出污染改写结果。改写要的是快且不发挥，非推理模型才对。
     # 实测同一 prompt：qwen-turbo 0.47s / qwen-flash 0.69s / qwen-plus 1.10s，均无思考 token。
-    model: ${REWRITE_MODEL:qwen-turbo}
+    model: ${REWRITE_MODEL:qwen3.7-plus}
     # 超时后静默回退原问题，绝不阻断主流程
-    timeout-ms: 3000
+    timeout-ms: 10000
     # 只喂最近 N 轮，喂太多历史会把改写带偏到旧话题
     max-history-pairs: 3
     # 改写结果超过原问题这个倍数 → 判定模型在扩写或直接作答了，回退原问题

@@ -66,6 +66,13 @@ public class TracingToolCallback implements ToolCallback {
 
     private String record(String toolInput, ToolInvocation invocation) {
         String name = getToolDefinition().name();
+        // 预算控制：耗尽即中断 ChatClient 内部工具循环（见 ToolCallBudget 类注释）。
+        // 必须抛普通 RuntimeException 而非 ToolExecutionException —— 后者会被官方
+        // ToolExecutionExceptionProcessor 转成错误文本回灌给模型，循环不会停。
+        if (!ToolCallBudget.tryAcquire()) {
+            log.warn("🛠️[NATIVE_TOOL_CALL] 工具调用次数已达上限，中断本轮循环: tool={}", name);
+            throw new IllegalStateException("已达到本次问答的工具调用次数上限 (agent.max-tool-calls)，请缩小问题范围后重试");
+        }
         long start = System.currentTimeMillis();
         log.info("🛠️[NATIVE_TOOL_CALL] LLM 通过原生 tool_calls 通道调用 {}，入参={}", name, toolInput);
 
