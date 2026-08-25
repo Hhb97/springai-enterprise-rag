@@ -36,11 +36,29 @@ public final class StreamChannel {
 
     private final AtomicBoolean finished = new AtomicBoolean(false);
 
+    /**
+     * 丢弃模式：所有 emit 直接返回，不产生任何事件。
+     *
+     * <p>用途是让<b>阻塞式问答和流式问答共用同一条流水线</b>。改造前两者是逐行复制的两份实现
+     * （流式版 = 阻塞版 + ch.emit + 断连检查），Plan/ReAct 两个服务因此各自膨胀到 900 行上下，
+     * 且已经出现「只在其中一份里修了 bug」的风险。现在流水线只写一遍：
+     * 流式入口传真通道，阻塞入口传丢弃通道，取流水线的返回值即可。
+     */
+    private final boolean discarding;
+
+    /** 真实 SSE 通道。 */
     public static StreamChannel open() {
-        return new StreamChannel();
+        return new StreamChannel(false);
     }
 
-    private StreamChannel() {}
+    /** 丢弃通道：供阻塞式调用复用同一条流水线，事件全部丢掉。 */
+    public static StreamChannel discarding() {
+        return new StreamChannel(true);
+    }
+
+    private StreamChannel(boolean discarding) {
+        this.discarding = discarding;
+    }
 
     /** 客户端是否已不可达（断连/超时/已收尾），为 true 时 worker 应尽快退出。 */
     public boolean isFinished() {
@@ -52,7 +70,7 @@ public final class StreamChannel {
      * MappingJackson2HttpMessageConverter 输出格式一致，前端 JSON.parse 行为不变。
      */
     public void emit(String eventName, Object data) {
-        if (finished.get()) return;
+        if (discarding || finished.get()) return;
         String json;
         try {
             json = MAPPER.writeValueAsString(data);
@@ -69,6 +87,7 @@ public final class StreamChannel {
 
     /** 推送 error 事件并终止流（幂等）。 */
     public void emitError(String message) {
+        if (discarding) return;
         if (!finished.compareAndSet(false, true)) return;
         try {
             sink.tryEmitNext(ServerSentEvent.<String>builder(
@@ -80,6 +99,7 @@ public final class StreamChannel {
 
     /** 正常收尾并终止流（幂等）。 */
     public void complete() {
+        if (discarding) return;
         if (!finished.compareAndSet(false, true)) return;
         sink.tryEmitComplete();
     }

@@ -3,6 +3,8 @@ package com.example.ragassitant.application.service;
 import com.example.ragassitant.common.trace.TraceIdFilter;
 import com.example.ragassitant.domain.model.DocumentChunk;
 import com.example.ragassitant.domain.model.ToolCall;
+import com.example.ragassitant.domain.service.AgentTextUtils;
+import com.example.ragassitant.domain.service.HeuristicRouter;
 import com.example.ragassitant.domain.service.PromptBuilder;
 import com.example.ragassitant.domain.service.PromptInjectionDetector;
 import com.example.ragassitant.domain.service.TextToolCallParser;
@@ -64,7 +66,9 @@ public class ReActAgentAppService {
                                  TextToolCallParser textToolCallParser,
                                  AgentProperties props,
                                  PromptInjectionDetector injectionDetector,
-                                 AgentTraceStorePort traceStore) {
+                                 AgentTraceStorePort traceStore,
+                                AgentRequestPreparer requestPreparer) {
+        this.requestPreparer = requestPreparer;
         this.llmPort = llmPort;
         this.conversationStorePort = conversationStorePort;
         this.toolRegistry = toolRegistry;
@@ -125,83 +129,27 @@ public class ReActAgentAppService {
         long totalStart = System.currentTimeMillis();
         log.info("🧠 ReActStream 处理问题: sessionId={}, useRag={}, question={}", sessionId, useRag, question);
 
-        List<Map.Entry<String, String>> history = conversationStorePort.getHistory(
-                sessionId, props.getMemorySize());
-
-        if (isSmallTalk(question)) {
+        // ===== 闲聊短路：必须在 Query 改写与向量检索之前 =====
+        if (HeuristicRouter.isSmallTalk(question)) {
             handleSmallTalkStream(ch, question, sessionId);
             return;
         }
         if (ch.isFinished()) return;
 
-        // ️ Prompt Injection 安全检测
-        if (injectionDetector.isPromptInjection(question)) {
-            String attackType = injectionDetector.getAttackType(question);
-            log.warn("🛡️ 拦截 Prompt Injection 攻击: sessionId={}, attackType={}", sessionId, attackType);
-            String rejectionMsg = "抱歉，我检测到您的请求中包含试图绕过系统安全策略的指令。作为智能运维助手，我必须遵守预设的角色和职责范围，无法执行此类操作。如果您有设备查询、能耗分析或运维知识库相关的问题，欢迎随时向我提问！";
-            traceStore.recordDecision(sessionId, 1, "SECURITY_BLOCK",
-                    null, null, null,
-                    rejectionMsg, rejectionMsg,
-                    false, "prompt_injection",
-                    0L, "BLOCKED", attackType);
-            conversationStorePort.saveUser(sessionId, question);
-            conversationStorePort.saveAssistant(sessionId, rejectionMsg);
-            ch.emit( "security_block", Map.of(
-                    "type", "prompt_injection",
-                    "attackType", attackType,
-                    "answer", rejectionMsg
-            ));
-            ch.emit( "final_answer", Map.of("answer", rejectionMsg));
-            ch.emit( "done", Map.of("durationMs", System.currentTimeMillis() - totalStart));
+        // 与阻塞版共用同一份前置流程，差别只在这里传的是真实通道
+        AgentRequestPreparer.Prepared prep = requestPreparer.prepare(
+                question, sessionId, useRag, enableHybridSearch, customTopK,
+                "react", props.getMemorySize(), DEFAULT_TOP_K, ch);
+        if (prep.blocked()) {
+            ch.emit("final_answer", Map.of("answer", prep.blockedAnswer()));
+            ch.emit("done", Map.of("durationMs", System.currentTimeMillis() - totalStart));
             return;
         }
-        if (ch.isFinished()) return;
 
-        String retrievalQuery = question;
-        boolean queryRewritten = false;
-        String rewrittenQuery = null;
-
-        if (!history.isEmpty() && queryRewriteService.isEnabled() && !ch.isFinished()) {
-            long rwStart = System.currentTimeMillis();
-            List<String> rewrites = queryRewriteService.rewrite(question, history, sessionId);
-            long rewriteMs = System.currentTimeMillis() - rwStart;
-            if (rewrites != null && !rewrites.isEmpty()) {
-                rewrittenQuery = rewrites.get(0);
-                queryRewritten = !rewrittenQuery.equals(question);
-                if (queryRewritten) {
-                    retrievalQuery = rewrittenQuery;
-                    ch.emit( "rewrite",
-                            Map.of("from", question, "to", rewrittenQuery, "ms", rewriteMs));
-                }
-            }
-        }
-        if (ch.isFinished()) return;
-
-        List<DocumentChunk> docs = new ArrayList<>();
-        List<Map<String, Object>> sources = new ArrayList<>();
+        List<Map.Entry<String, String>> history = prep.history();
+        List<DocumentChunk> docs = prep.docs();
+        List<Map<String, Object>> sources = prep.sources();
         String systemPrompt;
-
-        if (useRag && !ch.isFinished()) {
-            try {
-                int topK = customTopK != null ? customTopK : 5;
-                docs = ragAppService.retrieveDocuments(retrievalQuery, enableHybridSearch, topK);
-                for (DocumentChunk doc : docs) {
-                    Map<String, Object> source = new HashMap<>();
-                    source.put("content", doc.getText());
-                    Map<String, Object> meta = doc.getMetadata();
-                    Object title = meta != null ? meta.get("title") : null;
-                    Object fileName = meta != null ? meta.get("fileName") : null;
-                    source.put("metadata", (title != null ? title : (fileName != null ? fileName : "文档")));
-                    source.put("score", doc.getScore());
-                    sources.add(source);
-                }
-                if (!docs.isEmpty()) {
-                    ch.emit( "rag_ready", Map.of("count", docs.size()));
-                }
-            } catch (Exception e) {
-                log.warn("⚠️ ReActStream RAG 检索失败，已跳过: {}", e.getMessage());
-            }
-        }
         if (ch.isFinished()) return;
 
         systemPrompt = promptBuilder.buildReActSystemPrompt(toolCatalog.renderForPrompt(), docs);
@@ -286,7 +234,7 @@ public class ReActAgentAppService {
             StepDecision decision = parseReActResponse(llmResponse);
             long stepMs = System.currentTimeMillis() - stepStart;
             log.info("🧠 ReActStream step {} end: thought={} tool={} final={}",
-                    step, truncate(decision.thought(), 60),
+                    step, AgentTextUtils.truncate(decision.thought(), 60),
                     decision.toolCall() != null ? decision.toolCall().name : "none",
                     decision.isFinalAnswer());
 
@@ -307,7 +255,7 @@ public class ReActAgentAppService {
                 stepTraces.add(buildStepTrace(step, decision.thought(), null, decision.answer(), null, stepMs));
                 traceStore.recordDecision(sessionId, 1, "REACT_STEP",
                         null, null, null,
-                        truncate(decision.thought(), 500),
+                        AgentTextUtils.truncate(decision.thought(), 500),
                         "FinalAnswer 长度=" + (decision.answer() == null ? 0 : decision.answer().length()),
                         false, "REACT_STEP_FINAL",
                         stepMs, "OK", null);
@@ -320,13 +268,13 @@ public class ReActAgentAppService {
                 stepTraces.add(buildStepTrace(step, decision.thought(), null, null, "未识别到工具调用或最终答案", stepMs));
                 traceStore.recordDecision(sessionId, 1, "REACT_STEP",
                         null, null, null,
-                        truncate(decision.thought(), 500),
+                        AgentTextUtils.truncate(decision.thought(), 500),
                         "未识别到工具调用或最终答案，提前结束",
                         false, "REACT_STEP_NO_TOOL",
                         stepMs, "WARN", "parse_fail_tool_or_answer");
                 finalAnswer = (decision.answer() != null && !decision.answer().isBlank())
                         ? decision.answer()
-                        : (decision.thought() != null ? decision.thought() : cleanupAnswer(llmResponse));
+                        : (decision.thought() != null ? decision.thought() : AgentTextUtils.cleanupAnswer(llmResponse));
                 streamFinalAnswer(ch, finalAnswer);
                 break;
             }
@@ -358,7 +306,7 @@ public class ReActAgentAppService {
             stepTraces.add(buildStepTrace(step, decision.thought(), tc, observation, null, stepMs));
             traceStore.recordDecision(sessionId, 1, "REACT_STEP",
                     tc.name, tc.arguments, observation,
-                    truncate(decision.thought(), 500),
+                    AgentTextUtils.truncate(decision.thought(), 500),
                     "Tool 执行长度=" + (observation == null ? 0 : observation.length()),
                     false, "REACT_STEP_TOOL_" + (toolOk ? "OK" : "ERR"),
                     stepMs, toolOk ? "OK" : "ERROR", toolErr);
@@ -460,7 +408,7 @@ public class ReActAgentAppService {
                 })
                 .doOnComplete(() -> {
                     String reply = buf.toString();
-                    String answer = (reply == null || reply.isBlank()) ? SMALL_TALK_FALLBACK : cleanupAnswer(reply);
+                    String answer = (reply == null || reply.isBlank()) ? SMALL_TALK_FALLBACK : AgentTextUtils.cleanupAnswer(reply);
                     if (answer.isBlank()) answer = SMALL_TALK_FALLBACK;
                     fullReply.set(answer);
                     long ms = System.currentTimeMillis() - start;
@@ -508,76 +456,26 @@ public class ReActAgentAppService {
         long totalStart = System.currentTimeMillis();
         log.info("🧠 ReAct 处理问题: sessionId={}, useRag={}, question={}", sessionId, useRag, question);
 
-        List<Map.Entry<String, String>> history = conversationStorePort.getHistory(
-                sessionId, props.getMemorySize());
-
-        if (isSmallTalk(question)) {
+        // ===== 闲聊短路：必须在 Query 改写与向量检索之前 =====
+        if (HeuristicRouter.isSmallTalk(question)) {
             return handleSmallTalk(question, sessionId);
         }
 
-        // 🛡️ Prompt Injection 安全检测（非流式之前漏掉了，现在补上）
-        if (injectionDetector.isPromptInjection(question)) {
-            String attackType = injectionDetector.getAttackType(question);
-            log.warn("🛡️ 拦截 Prompt Injection 攻击: sessionId={}, attackType={}", sessionId, attackType);
-            String rejectionMsg = "抱歉，我检测到您的请求中包含试图绕过系统安全策略的指令。作为智能运维助手，我必须遵守预设的角色和职责范围，无法执行此类操作。如果您有设备查询、能耗分析或运维知识库相关的问题，欢迎随时向我提问！";
-            traceStore.recordDecision(sessionId, 1, "SECURITY_BLOCK",
-                    null, null, null,
-                    rejectionMsg, rejectionMsg,
-                    false, "prompt_injection",
-                    0L, "BLOCKED", attackType);
-            conversationStorePort.saveUser(sessionId, question);
-            conversationStorePort.saveAssistant(sessionId, rejectionMsg);
-            Map<String, Object> r = new HashMap<>();
-            r.put("answer", rejectionMsg);
-            r.put("sources", List.of());
-            r.put("mode", "react");
-            r.put("totalMs", System.currentTimeMillis() - totalStart);
-            r.put("blocked", true);
-            r.put("blockType", "prompt_injection");
-            return r;
+        AgentRequestPreparer.Prepared prep = requestPreparer.prepare(
+                question, sessionId, useRag, enableHybridSearch, customTopK,
+                "react", props.getMemorySize(), DEFAULT_TOP_K, StreamChannel.discarding());
+        if (prep.blocked()) {
+            return Map.of("answer", prep.blockedAnswer(), "sources", List.of(),
+                    "mode", "react", "steps", List.of(), "stepCount", 0,
+                    "totalMs", System.currentTimeMillis() - totalStart,
+                    "sessionId", sessionId == null ? "" : sessionId,
+                    "securityBlocked", true);
         }
 
-        String retrievalQuery = question;
-        boolean queryRewritten = false;
-        String rewrittenQuery = null;
-        long rewriteMs = 0;
-
-        if (!history.isEmpty() && queryRewriteService.isEnabled()) {
-            long rwStart = System.currentTimeMillis();
-            List<String> rewrites = queryRewriteService.rewrite(question, history, sessionId);
-            rewriteMs = System.currentTimeMillis() - rwStart;
-            if (rewrites != null && !rewrites.isEmpty()) {
-                rewrittenQuery = rewrites.get(0);
-                queryRewritten = !rewrittenQuery.equals(question);
-                if (queryRewritten) {
-                    retrievalQuery = rewrittenQuery;
-                    log.info("🧠 ReAct Query 改写: '{}' → '{}'", question, rewrittenQuery);
-                }
-            }
-        }
-
-        List<DocumentChunk> docs = new ArrayList<>();
-        List<Map<String, Object>> sources = new ArrayList<>();
+        List<Map.Entry<String, String>> history = prep.history();
+        List<DocumentChunk> docs = prep.docs();
+        List<Map<String, Object>> sources = prep.sources();
         String systemPrompt;
-
-        if (useRag) {
-            try {
-                int topK = customTopK != null ? customTopK : 5;
-                docs = ragAppService.retrieveDocuments(retrievalQuery, enableHybridSearch, topK);
-                for (DocumentChunk doc : docs) {
-                    Map<String, Object> source = new HashMap<>();
-                    source.put("content", doc.getText());
-                    Map<String, Object> meta = doc.getMetadata();
-                    Object title = meta != null ? meta.get("title") : null;
-                    Object fileName = meta != null ? meta.get("fileName") : null;
-                    source.put("metadata", (title != null ? title : (fileName != null ? fileName : "文档")));
-                    source.put("score", doc.getScore());
-                    sources.add(source);
-                }
-            } catch (Exception e) {
-                log.warn("⚠️ ReAct RAG 检索失败，已跳过: {}", e.getMessage());
-            }
-        }
 
         systemPrompt = promptBuilder.buildReActSystemPrompt(toolCatalog.renderForPrompt(), docs);
 
@@ -633,7 +531,7 @@ public class ReActAgentAppService {
         String reply = llmPort.chatWithRawMessages(messages);
         long elapsed = System.currentTimeMillis() - start;
 
-        String answer = (reply == null || reply.isBlank()) ? SMALL_TALK_FALLBACK : cleanupAnswer(reply);
+        String answer = (reply == null || reply.isBlank()) ? SMALL_TALK_FALLBACK : AgentTextUtils.cleanupAnswer(reply);
         if (answer.isBlank()) answer = SMALL_TALK_FALLBACK;
 
         traceStore.recordDecision(sessionId, 1, "SMALL_TALK",
@@ -696,7 +594,7 @@ public class ReActAgentAppService {
             long stepMs = System.currentTimeMillis() - stepStart;
 
             log.info("🧠 ReAct step {}: thought='{}' tool={} final={}",
-                    step, truncate(decision.thought(), 80),
+                    step, AgentTextUtils.truncate(decision.thought(), 80),
                     decision.toolCall() != null ? decision.toolCall().name : "none",
                     decision.isFinalAnswer());
 
@@ -704,7 +602,7 @@ public class ReActAgentAppService {
                 stepTraces.add(buildStepTrace(step, decision.thought(), null, decision.answer(), null, stepMs));
                 traceStore.recordDecision(sessionId, 1, "REACT_STEP",
                         null, null, null,
-                        truncate(decision.thought(), 500),
+                        AgentTextUtils.truncate(decision.thought(), 500),
                         "FinalAnswer 长度=" + (decision.answer() == null ? 0 : decision.answer().length()),
                         false, "REACT_STEP_FINAL",
                         stepMs, "OK", null);
@@ -716,13 +614,13 @@ public class ReActAgentAppService {
                 stepTraces.add(buildStepTrace(step, decision.thought(), null, null, "未识别到工具调用或最终答案", stepMs));
                 traceStore.recordDecision(sessionId, 1, "REACT_STEP",
                         null, null, null,
-                        truncate(decision.thought(), 500),
+                        AgentTextUtils.truncate(decision.thought(), 500),
                         "未识别到工具调用或最终答案，提前结束",
                         false, "REACT_STEP_NO_TOOL",
                         stepMs, "WARN", "parse_fail_tool_or_answer");
                 finalAnswer = (decision.answer() != null && !decision.answer().isBlank())
                         ? decision.answer()
-                        : (decision.thought() != null ? decision.thought() : cleanupAnswer(llmResponse));
+                        : (decision.thought() != null ? decision.thought() : AgentTextUtils.cleanupAnswer(llmResponse));
                 break;
             }
 
@@ -741,7 +639,7 @@ public class ReActAgentAppService {
             stepTraces.add(buildStepTrace(step, decision.thought(), decision.toolCall(), observation, null, stepMs));
             traceStore.recordDecision(sessionId, 1, "REACT_STEP",
                     decision.toolCall().name, decision.toolCall().arguments, observation,
-                    truncate(decision.thought(), 500),
+                    AgentTextUtils.truncate(decision.thought(), 500),
                     "Tool 执行长度=" + (observation == null ? 0 : observation.length()),
                     false, "REACT_STEP_TOOL_" + (toolOk ? "OK" : "ERR"),
                     stepMs, toolOk ? "OK" : "ERROR", toolErr);
@@ -818,7 +716,7 @@ public class ReActAgentAppService {
             }
         }
 
-        return new StepDecision("", null, true, cleanupAnswer(llmResponse));
+        return new StepDecision("", null, true, AgentTextUtils.cleanupAnswer(llmResponse));
     }
 
     private Map<String, Object> parseStructuredJson(String text) {
@@ -865,33 +763,9 @@ public class ReActAgentAppService {
         return trace;
     }
 
-    private String cleanupAnswer(String answer) {
-        if (answer == null) return "";
-        String cleaned = answer.replaceAll("(?s)\\[Tools?\\].*?(?=\\n(?:## |### |回答：|基于|综上|因此|总结|设备|根据)|$)", "");
-        cleaned = cleaned.replaceAll("(?s)\\{\\s*\"name\"\\s*:.*?\"arguments\"\\s*:.*?\\}", "");
-        cleaned = cleaned.replaceAll("(?s)\\[\\s*\\{\\s*\"name\".*?\\}\\s*\\]", "");
-        cleaned = cleaned.replace("```json", "").replace("```", "");
-        cleaned = cleaned.replaceAll("^Thought[：:].*$", "");
-        cleaned = cleaned.replaceAll("^Action[：:].*$", "");
-        cleaned = cleaned.replaceAll("^Observation[：:].*$", "");
-        cleaned = cleaned.replaceAll("^Answer[：:].*$", "");
-        return cleaned.trim();
-    }
 
-    private boolean isSmallTalk(String q) {
-        if (q == null || q.isBlank()) return false;
-        String lower = q.trim().toLowerCase();
-        return SMALL_TALK_PATTERN.matcher(lower).matches();
-    }
 
-    private static String truncate(String s, int max) {
-        if (s == null) return "";
-        return s.length() <= max ? s : s.substring(0, max) + "...";
-    }
 
-    private static final Pattern SMALL_TALK_PATTERN = Pattern.compile(
-            "^(你好|您好|hi|hello|hey|thanks|谢谢|再见|拜拜|bye|good\\s*morning|早上好|晚安|good\\s*night|你是谁|你叫什么|介绍一下自己)$"
-    );
 
     private record StepDecision(String thought, ToolCall toolCall, boolean isFinalAnswer, String answer) {}
 

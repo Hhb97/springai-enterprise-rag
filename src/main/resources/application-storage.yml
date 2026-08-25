@@ -14,3 +14,18 @@ influxdb:
   database: acucloud-dev
   retention-policy: autogen
   timeout-seconds: 30
+
+# ===== Redis（agent.memory.persistence=redis 时的会话历史存储）=====
+# Lettuce 懒连接：配错地址不影响启动，首次读写会话时才报错并回退行为见日志
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:192.168.221.130}
+      port: ${REDIS_PORT:26739}
+      password: ${REDIS_PASSWORD:123456}
+      database: ${REDIS_DATABASE:0}   # 添加这一行，默认使用 DB 0
+      timeout: 3s
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 4

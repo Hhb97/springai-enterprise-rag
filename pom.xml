@@ -101,6 +101,17 @@
             <artifactId>spring-boot-starter-data-jpa</artifactId>
         </dependency>
 
+        <!-- Spring Data Redis：会话历史持久化（agent.memory.persistence=redis 时启用）
+             【为什么不用 spring-ai-starter-model-chat-memory-repository-redis】
+             官方 RedisChatMemoryRepository 依赖 RediSearch 模块（FT.CREATE/FT.SEARCH 建索引），
+             只有 Redis Stack 或 Redis 8.0+ 才内置；普通 redis 7.x 会直接报 unknown command。
+             会话记忆只需要 get/add/clear/findConversationIds 四个操作，
+             自研一个基于 String/List/Set 的轻量实现（RedisChatMemoryRepository）即可全版本兼容。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!-- H2 Database -->
         <dependency>
             <groupId>com.h2database</groupId>

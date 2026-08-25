@@ -7,6 +7,7 @@ import com.example.ragassitant.domain.spi.LlmPort.MessageDTO.Role;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.memory.InMemoryChatMemoryRepository;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -17,6 +18,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -82,27 +84,44 @@ public class SpringAiConversationStore implements ConversationStorePort {
     /** 单次摘要喂给 LLM 的最大字符数，防止极端长轮次撑爆辅助模型上下文。 */
     private final int summaryMaxPromptChars;
 
+    /** redis 持久化模式下的仓库（memory 模式为 null）；滚动摘要的读写也走它，重启不丢。 */
+    private final RedisChatMemoryRepository redisRepository;
+
     public SpringAiConversationStore(
             @Value("${agent.memory-size:20}") int maxTurnsPerSession,
             @Value("${agent.session-ttl-minutes:120}") long sessionTtlMinutes,
             @Value("${agent.max-sessions:500}") int maxSessions,
             @Qualifier("queryRewriteLlmPort") LlmPort summaryLlm,
             @Value("${agent.memory-summary.enabled:true}") boolean summaryEnabled,
-            @Value("${agent.memory-summary.max-prompt-chars:6000}") int summaryMaxPromptChars) {
+            @Value("${agent.memory-summary.max-prompt-chars:6000}") int summaryMaxPromptChars,
+            @Value("${agent.memory.persistence:memory}") String persistence,
+            org.springframework.data.redis.core.StringRedisTemplate redisTemplate) {
         this.maxTurnsPerSession = Math.max(1, maxTurnsPerSession);
         this.sessionTtlMillis = Math.max(0, sessionTtlMinutes) * 60_000L;
         this.maxSessions = Math.max(1, maxSessions);
         this.summaryLlm = summaryLlm;
         this.summaryEnabled = summaryEnabled;
         this.summaryMaxPromptChars = Math.max(1000, summaryMaxPromptChars);
+
         // 窗口按「消息条数」算：一轮问答占两条，所以 ×2。
         // 若最后一条 user 还没等到 assistant 回复就被挤出窗口，getHistory 会跳过孤儿 user。
+        // 持久化模式：memory=进程内（重启丢失）；redis=存 Redis（重启恢复、多副本共享，
+        //   键带原生 TTL 与 session-ttl-minutes 对齐，Redis 侧自动淘汰过期会话）。
+        ChatMemoryRepository repository;
+        if ("redis".equalsIgnoreCase(persistence)) {
+            Duration ttl = this.sessionTtlMillis > 0 ? Duration.ofMillis(this.sessionTtlMillis) : null;
+            this.redisRepository = new RedisChatMemoryRepository(redisTemplate, "rag:chat:", ttl);
+            repository = this.redisRepository;
+        } else {
+            this.redisRepository = null;
+            repository = new InMemoryChatMemoryRepository();
+        }
         this.chatMemory = MessageWindowChatMemory.builder()
-                .chatMemoryRepository(new InMemoryChatMemoryRepository())
+                .chatMemoryRepository(repository)
                 .maxMessages(this.maxTurnsPerSession * 2)
                 .build();
-        log.info("🔧 会话存储(Spring AI ChatMemory)配置: 单会话最多 {} 轮, 空闲 {} 分钟过期, 最多 {} 个会话, 滚动摘要={}",
-                this.maxTurnsPerSession, sessionTtlMinutes, this.maxSessions,
+        log.info("🔧 会话存储(Spring AI ChatMemory)配置: 持久化={}, 单会话最多 {} 轮, 空闲 {} 分钟过期, 最多 {} 个会话, 滚动摘要={}",
+                persistence.toLowerCase(), this.maxTurnsPerSession, sessionTtlMinutes, this.maxSessions,
                 summaryEnabled ? "开启" : "关闭");
     }
 
@@ -177,18 +196,32 @@ public class SpringAiConversationStore implements ConversationStorePort {
             for (Message m : remaining) {
                 chatMemory.add(sessionId, m);
             }
+            String current = readSummary(sessionId);
             log.info("📝 会话滚动摘要: sessionId={}, 压缩 {} 条旧消息, 窗口剩余 {}, 累计摘要长度 {} 字",
-                    sessionId, covered, remaining.size(),
-                    sessionSummaries.getOrDefault(sessionId, "").length());
+                    sessionId, covered, remaining.size(), current == null ? 0 : current.length());
         } catch (Exception e) {
             // 摘要属于锦上添花，任何异常都不影响正常保存
             log.warn("📝 会话滚动摘要失败(忽略): sessionId={}, err={}", sessionId, e.toString());
         }
     }
 
+    /** 摘要读取：redis 模式从 Redis 取（重启不丢），memory 模式从进程内 Map 取。 */
+    private String readSummary(String sessionId) {
+        return redisRepository != null ? redisRepository.findSummary(sessionId) : sessionSummaries.get(sessionId);
+    }
+
+    /** 摘要写入：按持久化模式分流。 */
+    private void writeSummary(String sessionId, String summary) {
+        if (redisRepository != null) {
+            redisRepository.saveSummary(sessionId, summary);
+        } else {
+            sessionSummaries.put(sessionId, summary);
+        }
+    }
+
     /** 用轻量后端把「旧摘要 + 新被裁轮次」合成为新摘要；失败保留旧摘要。 */
     private void mergeSummary(String sessionId, String evictedTranscript) {
-        String prev = sessionSummaries.getOrDefault(sessionId, "");
+        String prev = readSummary(sessionId);
         String clipped = evictedTranscript.length() > summaryMaxPromptChars
                 ? evictedTranscript.substring(evictedTranscript.length() - summaryMaxPromptChars)
                 : evictedTranscript;
@@ -202,7 +235,7 @@ public class SpringAiConversationStore implements ConversationStorePort {
                 new MessageDTO(Role.USER, instruction)));
         long ms = System.currentTimeMillis() - start;
         if (summary != null && !summary.isBlank()) {
-            sessionSummaries.put(sessionId, summary.trim());
+            writeSummary(sessionId, summary.trim());
             log.info("📝 摘要更新完成: sessionId={}, 耗时 {}ms, 长度 {} 字", sessionId, ms, summary.trim().length());
         } else {
             log.warn("📝 摘要返回为空，保留旧摘要: sessionId={}, 耗时 {}ms", sessionId, ms);
@@ -219,11 +252,13 @@ public class SpringAiConversationStore implements ConversationStorePort {
     public List<Map.Entry<String, String>> getHistory(String sessionId, int maxPairs) {
         List<Map.Entry<String, String>> result = new ArrayList<>();
         if (sessionId == null || sessionId.isBlank()) return result;
-        if (!lastAccess.containsKey(sessionId)) return result;
+        // 【redis 持久化】应用重启后 lastAccess 表为空，但 Redis 里历史还在——
+        // 只要窗口里有消息就视为已知会话并恢复追踪（摘要同样从 Redis 恢复）。
+        List<Message> messages = chatMemory.get(sessionId);
+        if (!lastAccess.containsKey(sessionId) && messages.isEmpty()) return result;
         touch(sessionId);
 
         int limit = maxPairs <= 0 ? maxTurnsPerSession : maxPairs;
-        List<Message> messages = chatMemory.get(sessionId);
 
         // 先收集所有完整配对，再取尾部 limit 对
         List<Map.Entry<String, String>> complete = new ArrayList<>();
@@ -238,7 +273,7 @@ public class SpringAiConversationStore implements ConversationStorePort {
 
         // 滚动摘要作为第一对伪消息返回：各 AppService 按普通 user→assistant 对拼进
         // messages，模型因此能"看到"已被窗口裁掉的早期内容要点。无摘要时行为与从前完全一致。
-        String summary = sessionSummaries.get(sessionId);
+        String summary = readSummary(sessionId);
         if (summary != null && !summary.isBlank()) {
             result.add(0, new AbstractMap.SimpleEntry<>(
                     "[以下是本会话更早轮次的自动摘要，原文已超出上下文窗口，请结合它理解后续问题]",
@@ -281,17 +316,23 @@ public class SpringAiConversationStore implements ConversationStorePort {
 
     @Override
     public Map<String, String> getSummaries() {
-        return Map.copyOf(sessionSummaries);
+        return redisRepository != null ? redisRepository.findAllSummaries() : Map.copyOf(sessionSummaries);
     }
 
     @Override
     public Map<String, List<Map.Entry<String, String>>> getAllSessionHistories() {
-        // 按最后访问时间倒序（最近活跃的会话排前面），方便页面查看
-        List<String> ids = new ArrayList<>(lastAccess.keySet());
-        ids.sort(Comparator.comparingLong((String id) -> lastAccess.get(id).get()).reversed());
+        // redis 持久化模式：会话清单以 Redis 为准（应用重启后 lastAccess 表是空的）；
+        // memory 模式：以 lastAccess 表为准。按最后访问时间倒序（最近活跃的排前面）。
+        java.util.Set<String> ids = new java.util.LinkedHashSet<>(lastAccess.keySet());
+        if (redisRepository != null) {
+            ids.addAll(redisRepository.findConversationIds());
+        }
+        List<String> ordered = new ArrayList<>(ids);
+        ordered.sort(Comparator.comparingLong((String id) ->
+                lastAccess.containsKey(id) ? lastAccess.get(id).get() : 0L).reversed());
 
         Map<String, List<Map.Entry<String, String>>> result = new LinkedHashMap<>();
-        for (String sid : ids) {
+        for (String sid : ordered) {
             List<Message> messages = chatMemory.get(sid);
             List<Map.Entry<String, String>> pairs = new ArrayList<>();
             for (int i = 0; i < messages.size() - 1; i++) {

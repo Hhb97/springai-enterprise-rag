@@ -4,6 +4,7 @@ import com.example.ragassitant.common.trace.TraceIdFilter;
 import com.example.ragassitant.domain.model.DocumentChunk;
 import com.example.ragassitant.domain.model.PlanStep;
 import com.example.ragassitant.domain.model.ToolCall;
+import com.example.ragassitant.domain.service.AgentTextUtils;
 import com.example.ragassitant.domain.service.HeuristicRouter;
 import com.example.ragassitant.domain.service.PromptBuilder;
 import com.example.ragassitant.domain.service.PromptInjectionDetector;
@@ -60,6 +61,11 @@ import java.util.concurrent.atomic.AtomicReference;
 public class PlanThenExecuteAppService {
 
     private static final Logger log = LoggerFactory.getLogger(PlanThenExecuteAppService.class);
+
+    /** 调用方未指定 topK 时的默认值（保持原有取值）。 */
+    private static final int DEFAULT_TOP_K = 4;
+
+    private final AgentRequestPreparer requestPreparer;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final String SMALL_TALK_FALLBACK =
@@ -102,7 +108,9 @@ public class PlanThenExecuteAppService {
                                      QueryRewriteService queryRewriteService,
                                      ToolCatalog toolCatalog,
                                      PromptInjectionDetector injectionDetector,
-                                     AgentProperties props) {
+                                     AgentProperties props,
+                                     AgentRequestPreparer requestPreparer) {
+        this.requestPreparer = requestPreparer;
         this.llmPort = llmPort;
         this.conversationStorePort = conversationStorePort;
         this.toolRegistry = toolRegistry;
@@ -131,65 +139,27 @@ public class PlanThenExecuteAppService {
         long totalStart = System.currentTimeMillis();
         log.info("📋 Plan-then-Execute 处理问题: sessionId={}, useRag={}, question={}", sessionId, useRag, question);
 
-        List<Map.Entry<String, String>> history = loadHistory(sessionId);
-
-        // ===== 闲聊短路：和 Agent/ReAct 同一套判定 =====
+        // ===== 闲聊短路：必须在 Query 改写与向量检索之前 =====
+        // 问候没有可检索的语义，召回结果只会污染上下文（Agent 链路踩过这个坑）。
         if (HeuristicRouter.isSmallTalk(question)) {
             return handleSmallTalk(question, sessionId, totalStart);
         }
 
-        // ===== Prompt Injection 安全检测 =====
-        if (injectionDetector.isPromptInjection(question)) {
-            String attackType = injectionDetector.getAttackType(question);
-            log.warn("🛡️ 拦截 Prompt Injection 攻击: sessionId={}, attackType={}", sessionId, attackType);
-            String rejectionMsg = "抱歉，我检测到您的请求中包含试图绕过系统安全策略的指令。作为智能运维助手，我必须遵守预设的角色和职责范围，无法执行此类操作。如果您有设备查询、能耗分析或运维知识库相关的问题，欢迎随时向我提问！";
-            traceStore.recordDecision(sessionId, 1, "SECURITY_BLOCK",
-                    null, null, null,
-                    rejectionMsg, rejectionMsg,
-                    false, "prompt_injection",
-                    0L, "BLOCKED", attackType);
-            saveHistory(sessionId, question, rejectionMsg);
-            return buildResponse(rejectionMsg, List.of(), List.of(), false, null,
+        // 载入历史 → 注入检测 → Query 改写 → RAG 检索，四条链路共用一份实现
+        AgentRequestPreparer.Prepared prep = requestPreparer.prepare(
+                question, sessionId, useRag, enableHybridSearch, customTopK,
+                "plan", props.getMemorySize(), DEFAULT_TOP_K, StreamChannel.discarding());
+        if (prep.blocked()) {
+            return buildResponse(prep.blockedAnswer(), List.of(), List.of(), false, null,
                     0, 0, System.currentTimeMillis() - totalStart, sessionId);
         }
 
-        // ===== Query 改写：只用于检索，塞给 Solver 的仍是用户原话 =====
-        String retrievalQuery = question;
-        boolean queryRewritten = false;
-        String rewrittenQuery = null;
-        if (!history.isEmpty() && queryRewriteService.isEnabled()) {
-            List<String> rewrites = queryRewriteService.rewrite(question, history, sessionId);
-            if (rewrites != null && !rewrites.isEmpty()) {
-                rewrittenQuery = rewrites.get(0);
-                queryRewritten = !rewrittenQuery.equals(question);
-                if (queryRewritten) {
-                    retrievalQuery = rewrittenQuery;
-                    log.info("📋 Query 改写: '{}' → '{}'", question, rewrittenQuery);
-                }
-            }
-        }
-
-        // ===== RAG 检索 =====
-        List<DocumentChunk> docs = new ArrayList<>();
-        List<Map<String, Object>> sources = new ArrayList<>();
-        if (useRag) {
-            try {
-                int topK = customTopK != null && customTopK > 0 ? customTopK : 4;
-                docs = ragAppService.retrieveDocuments(retrievalQuery, enableHybridSearch, topK);
-                for (DocumentChunk doc : docs) {
-                    Map<String, Object> source = new HashMap<>();
-                    source.put("content", doc.getText());
-                    Map<String, Object> meta = doc.getMetadata();
-                    Object title = meta != null ? meta.get("title") : null;
-                    Object fileName = meta != null ? meta.get("fileName") : null;
-                    source.put("metadata", title != null ? title : (fileName != null ? fileName : "文档"));
-                    source.put("score", doc.getScore());
-                    sources.add(source);
-                }
-            } catch (Exception e) {
-                log.warn("⚠️ Plan RAG 检索失败，已跳过: {}", e.getMessage());
-            }
-        }
+        List<Map.Entry<String, String>> history = prep.history();
+        String retrievalQuery = prep.retrievalQuery();
+        boolean queryRewritten = prep.queryRewritten();
+        String rewrittenQuery = prep.rewrittenQuery();
+        List<DocumentChunk> docs = prep.docs();
+        List<Map<String, Object>> sources = prep.sources();
 
         // ===== 阶段一：Planner（一次 LLM 调用产出完整计划）=====
         long planStart = System.currentTimeMillis();
@@ -287,80 +257,33 @@ public class PlanThenExecuteAppService {
         long totalStart = System.currentTimeMillis();
         log.info("📋 PlanStream 处理问题: sessionId={}, useRag={}, question={}", sessionId, useRag, question);
 
-        List<Map.Entry<String, String>> history = loadHistory(sessionId);
-
-        // ===== 闲聊短路：和 Agent/ReAct 同一套判定 =====
+        // ===== 闲聊短路：必须在 Query 改写与向量检索之前 =====
         if (HeuristicRouter.isSmallTalk(question)) {
             handleSmallTalkStream(ch, question, sessionId, totalStart);
             return;
         }
         if (ch.isFinished()) return;
 
-        // ===== Prompt Injection 安全检测 =====
-        if (injectionDetector.isPromptInjection(question)) {
-            String attackType = injectionDetector.getAttackType(question);
-            log.warn("🛡️ 拦截 Prompt Injection 攻击: sessionId={}, attackType={}", sessionId, attackType);
-            String rejectionMsg = "抱歉，我检测到您的请求中包含试图绕过系统安全策略的指令。作为智能运维助手，我必须遵守预设的角色和职责范围，无法执行此类操作。如果您有设备查询、能耗分析或运维知识库相关的问题，欢迎随时向我提问！";
-            traceStore.recordDecision(sessionId, 1, "SECURITY_BLOCK",
-                    null, null, null,
-                    rejectionMsg, rejectionMsg,
-                    false, "prompt_injection",
-                    0L, "BLOCKED", attackType);
-            saveHistory(sessionId, question, rejectionMsg);
-            ch.emit( "security_block", Map.of(
-                    "type", "prompt_injection",
-                    "attackType", attackType,
-                    "answer", rejectionMsg));
-            ch.emit( "final_answer", Map.of("answer", rejectionMsg));
-            ch.emit( "done", Map.of(
-                    "answer", rejectionMsg, "sources", List.of(), "mode", "plan",
+        // 与阻塞版共用同一份前置流程，差别只在这里传的是真实通道
+        AgentRequestPreparer.Prepared prep = requestPreparer.prepare(
+                question, sessionId, useRag, enableHybridSearch, customTopK,
+                "plan", props.getMemorySize(), DEFAULT_TOP_K, ch);
+        if (prep.blocked()) {
+            ch.emit("final_answer", Map.of("answer", prep.blockedAnswer()));
+            ch.emit("done", Map.of(
+                    "answer", prep.blockedAnswer(), "sources", List.of(), "mode", "plan",
                     "totalMs", System.currentTimeMillis() - totalStart,
                     "steps", List.of(), "stepCount", 0, "sessionId", sessionId, "stream", true));
             return;
         }
         if (ch.isFinished()) return;
 
-        // ===== Query 改写：只用于检索，塞给 Solver 的仍是用户原话 =====
-        String retrievalQuery = question;
-        boolean queryRewritten = false;
-        String rewrittenQuery = null;
-        if (!history.isEmpty() && queryRewriteService.isEnabled()) {
-            List<String> rewrites = queryRewriteService.rewrite(question, history, sessionId);
-            if (rewrites != null && !rewrites.isEmpty()) {
-                rewrittenQuery = rewrites.get(0);
-                queryRewritten = !rewrittenQuery.equals(question);
-                if (queryRewritten) {
-                    retrievalQuery = rewrittenQuery;
-                    ch.emit( "rewrite", Map.of("from", question, "to", rewrittenQuery, "ms", 0));
-                }
-            }
-        }
-        if (ch.isFinished()) return;
-
-        // ===== RAG 检索 =====
-        List<DocumentChunk> docs = new ArrayList<>();
-        List<Map<String, Object>> sources = new ArrayList<>();
-        if (useRag) {
-            try {
-                int topK = customTopK != null && customTopK > 0 ? customTopK : 4;
-                docs = ragAppService.retrieveDocuments(retrievalQuery, enableHybridSearch, topK);
-                for (DocumentChunk doc : docs) {
-                    Map<String, Object> source = new HashMap<>();
-                    source.put("content", doc.getText());
-                    Map<String, Object> meta = doc.getMetadata();
-                    Object title = meta != null ? meta.get("title") : null;
-                    Object fileName = meta != null ? meta.get("fileName") : null;
-                    source.put("metadata", title != null ? title : (fileName != null ? fileName : "文档"));
-                    source.put("score", doc.getScore());
-                    sources.add(source);
-                }
-                if (!docs.isEmpty()) {
-                    ch.emit( "rag_ready", Map.of("count", docs.size()));
-                }
-            } catch (Exception e) {
-                log.warn("⚠️ PlanStream RAG 检索失败，已跳过: {}", e.getMessage());
-            }
-        }
+        List<Map.Entry<String, String>> history = prep.history();
+        String retrievalQuery = prep.retrievalQuery();
+        boolean queryRewritten = prep.queryRewritten();
+        String rewrittenQuery = prep.rewrittenQuery();
+        List<DocumentChunk> docs = prep.docs();
+        List<Map<String, Object>> sources = prep.sources();
         if (ch.isFinished()) return;
 
         // ===== 阶段一：Planner（静默一次生成完整计划）=====
@@ -610,7 +533,7 @@ public class PlanThenExecuteAppService {
     // ==================== 阶段一：Planner 解析 ====================
 
     private List<MessageDTO> buildPlannerMessages(String question, List<Map.Entry<String, String>> history) {
-        String historyText = formatHistory(history, 3);
+        String historyText = AgentTextUtils.formatHistory(history, 3);
         String catalogText = toolCatalog.renderForPrompt();
         MessageDTO system = new MessageDTO(Role.SYSTEM, promptBuilder.buildPlanSystemPrompt(catalogText, historyText));
         return List.of(system, new MessageDTO(Role.USER, question));
@@ -623,9 +546,9 @@ public class PlanThenExecuteAppService {
      */
     List<PlanStep> parsePlan(String raw, String sessionId) {
         if (raw == null || raw.isBlank()) return Collections.emptyList();
-        String json = extractJson(raw);
+        String json = AgentTextUtils.extractJson(raw);
         if (json == null || json.isBlank()) {
-            log.warn("⚠️ Planner 输出无法解析为 JSON，视为空计划: {}", truncate(raw, 200));
+            log.warn("⚠️ Planner 输出无法解析为 JSON，视为空计划: {}", AgentTextUtils.truncate(raw, 200));
             return Collections.emptyList();
         }
         try {
@@ -681,13 +604,6 @@ public class PlanThenExecuteAppService {
         return deps;
     }
 
-    private static String extractJson(String raw) {
-        String s = raw.replaceAll("```(?:json)?", "").trim();
-        int start = s.indexOf('{');
-        int end = s.lastIndexOf('}');
-        if (start < 0 || end <= start) return null;
-        return s.substring(start, end + 1);
-    }
 
     // ==================== 阶段二：Executor ====================
 
@@ -919,19 +835,5 @@ public class PlanThenExecuteAppService {
         return response;
     }
 
-    private String formatHistory(List<Map.Entry<String, String>> history, int maxPairs) {
-        if (history == null || history.isEmpty()) return "";
-        int from = Math.max(0, history.size() - maxPairs);
-        StringBuilder sb = new StringBuilder();
-        for (Map.Entry<String, String> pair : history.subList(from, history.size())) {
-            sb.append("用户: ").append(truncate(pair.getKey(), 200)).append('\n');
-            sb.append("助手: ").append(truncate(pair.getValue(), 200)).append('\n');
-        }
-        return sb.toString();
-    }
 
-    private static String truncate(String s, int max) {
-        if (s == null) return "";
-        return s.length() <= max ? s : s.substring(0, max) + "...";
-    }
 }

@@ -1466,6 +1466,15 @@
 
                 box.innerHTML = data.sessions.map(s => {
                     const open = sessionHistOpenSet.has(s.sessionId);
+                    const summaryBlock = s.hasSummary ? `
+                        <div style="background:rgba(245,158,11,0.06); border:1px dashed rgba(245,158,11,0.4); border-radius:8px;
+                                    padding:10px 14px; margin-bottom:12px;">
+                            <div style="font-size:12px; font-weight:600; color:#b45309; margin-bottom:4px;">
+                                🧠 滚动摘要（窗口外旧轮次的要点，随请求注入提示词）
+                            </div>
+                            <div style="font-size:13px; line-height:1.8; color:var(--text-secondary);
+                                        white-space:pre-wrap; word-break:break-word;">${escapeHtml(s.summary)}</div>
+                        </div>` : '';
                     const turns = (s.turns || []).map((t, i) => `
                         <div style="margin-bottom:10px;">
                             <div style="display:flex; gap:8px; margin-bottom:4px;">
@@ -1490,6 +1499,7 @@
                             </div>
                             <div id="sessionhist-body-${escapeHtml(s.sessionId)}" style="display:${open ? 'block' : 'none'};
                                         padding:12px 16px 14px 42px; border-top:1px dashed var(--border);">
+                                ${summaryBlock}
                                 ${turns || '<p style="color:var(--text-muted); font-size:13px;">窗口内暂无完整问答对</p>'}
                             </div>
                         </div>`;
