@@ -769,10 +769,6 @@ public class PlanThenExecuteAppService {
 
     // ==================== 公共环节 ====================
 
-    private List<Map.Entry<String, String>> loadHistory(String sessionId) {
-        if (sessionId == null || sessionId.isBlank()) return Collections.emptyList();
-        return conversationStorePort.getHistory(sessionId, props.getMemorySize());
-    }
 
     private void saveHistory(String sessionId, String question, String answer) {
         if (sessionId != null && !sessionId.isBlank()) {

@@ -44,6 +44,10 @@ public class ReActAgentAppService {
         return t;
     });
 
+    /** 调用方未指定 topK 时的默认值（保持原有取值）。 */
+    private static final int DEFAULT_TOP_K = 5;
+
+    private final AgentRequestPreparer requestPreparer;
     private final LlmPort llmPort;
     private final ConversationStorePort conversationStorePort;
     private final ToolRegistryPort toolRegistry;
@@ -147,6 +151,8 @@ public class ReActAgentAppService {
         }
 
         List<Map.Entry<String, String>> history = prep.history();
+        boolean queryRewritten = prep.queryRewritten();
+        String rewrittenQuery = prep.rewrittenQuery();
         List<DocumentChunk> docs = prep.docs();
         List<Map<String, Object>> sources = prep.sources();
         String systemPrompt;
@@ -473,6 +479,8 @@ public class ReActAgentAppService {
         }
 
         List<Map.Entry<String, String>> history = prep.history();
+        boolean queryRewritten = prep.queryRewritten();
+        String rewrittenQuery = prep.rewrittenQuery();
         List<DocumentChunk> docs = prep.docs();
         List<Map<String, Object>> sources = prep.sources();
         String systemPrompt;
@@ -511,7 +519,8 @@ public class ReActAgentAppService {
         response.put("mode", "react");
         response.put("queryRewritten", queryRewritten);
         response.put("rewrittenQuery", rewrittenQuery);
-        response.put("rewriteMs", rewriteMs);
+        // 改写耗时已随前置流程收进 AgentRequestPreparer，这里与流式版 rewrite 事件的口径保持一致
+        response.put("rewriteMs", 0L);
         response.put("totalMs", totalMs);
         response.put("steps", stepTraces);
         response.put("stepCount", stepTraces.size());

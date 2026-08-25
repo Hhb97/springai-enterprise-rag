@@ -41,10 +41,15 @@ class PlanThenExecuteAppServiceTest {
     void setUp() {
         DeviceTools deviceTools = new DeviceTools(new StubTimeSeriesDb(), new EnergyAggregator());
         ToolCatalog toolCatalog = new ToolCatalog(deviceTools, new NoopTraceStore());
+        // 前置流程（历史/注入检测/改写/检索）已抽到 AgentRequestPreparer，构造时一并传入
+        AgentRequestPreparer preparer = new AgentRequestPreparer(
+                new NoopConversationStore(), null, null,
+                new PromptInjectionDetector(), new NoopTraceStore());
         service = new PlanThenExecuteAppService(
                 new NoopLlm(), new NoopConversationStore(), new NoopToolRegistry(),
                 new PromptBuilder(), new NoopTraceStore(), null, null,
-                toolCatalog, new PromptInjectionDetector(), new AgentProperties());
+                toolCatalog, new PromptInjectionDetector(), new AgentProperties(),
+                preparer);
     }
 
     // ==================== 桩 ====================
