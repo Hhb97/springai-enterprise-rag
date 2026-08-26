@@ -1,6 +1,7 @@
 package com.example.ragassitant.interfaces.rest;
 
 import com.example.ragassitant.application.service.AgentAppService;
+import com.example.ragassitant.application.service.GraphAgentAppService;
 import com.example.ragassitant.application.service.IngestAppService;
 import com.example.ragassitant.application.service.PlanThenExecuteAppService;
 import com.example.ragassitant.application.service.RagAppService;
@@ -26,17 +27,20 @@ public class ChatController {
     private final AgentAppService agentAppService;
     private final ReActAgentAppService reActAgentAppService;
     private final PlanThenExecuteAppService planThenExecuteAppService;
+    private final GraphAgentAppService graphAgentAppService;
 
     public ChatController(RagAppService ragAppService,
                           IngestAppService ingestAppService,
                           AgentAppService agentAppService,
                           ReActAgentAppService reActAgentAppService,
-                          PlanThenExecuteAppService planThenExecuteAppService) {
+                          PlanThenExecuteAppService planThenExecuteAppService,
+                          GraphAgentAppService graphAgentAppService) {
         this.ragAppService = ragAppService;
         this.ingestAppService = ingestAppService;
         this.agentAppService = agentAppService;
         this.reActAgentAppService = reActAgentAppService;
         this.planThenExecuteAppService = planThenExecuteAppService;
+        this.graphAgentAppService = graphAgentAppService;
     }
 
     @PostMapping("/chat")
@@ -205,6 +209,22 @@ public class ChatController {
                 : request.getSessionId();
         boolean enableHybrid = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
         return planThenExecuteAppService.chatStream(
+                request.getQuestion(), sessionId, true, enableHybrid, request.getTopK());
+    }
+
+    /**
+     * 【POC】spring-ai-alibaba-graph 图编排流式端点（SSE）。
+     * 与 /plan-chat-stream 相同的 Planner→Executor→Solver 流程，但流程控制交给
+     * StateGraph（节点 + 条件边 + executor 自环），用于对比验证图框架与手写编排。
+     * 事件序列与 ReAct/Plan 流式对齐，前端可复用渲染；mode 标识为 "graph"。
+     */
+    @PostMapping(value = "/graph-chat-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> graphChatStream(@RequestBody ChatRequestDTO request) {
+        String sessionId = (request.getSessionId() == null || request.getSessionId().isBlank())
+                ? "graph-stream-" + System.currentTimeMillis()
+                : request.getSessionId();
+        boolean enableHybrid = request.getEnableHybridSearch() != null ? request.getEnableHybridSearch() : true;
+        return graphAgentAppService.chatStream(
                 request.getQuestion(), sessionId, true, enableHybrid, request.getTopK());
     }
 

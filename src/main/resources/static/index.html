@@ -2641,6 +2641,9 @@
                 <div class="mode-btn" id="modePlan" onclick="setMode('plan')">
                     <span>📋</span> Plan-then-Execute
                 </div>
+                <div class="mode-btn" id="modeGraph" onclick="setMode('graph')">
+                    <span>🧭</span> Graph
+                </div>
                 <div class="mode-btn" id="modeRag" onclick="setMode('rag')">
                     <span>📚</span> 知识库
                 </div>
@@ -2884,12 +2887,14 @@
         $('modeReAct').classList.toggle('active', mode === 'react');
         $('modeCompare').classList.toggle('active', mode === 'compare');
         $('modePlan').classList.toggle('active', mode === 'plan');
+        $('modeGraph').classList.toggle('active', mode === 'graph');
         $('modeRag').classList.toggle('active', mode === 'rag');
         const subtitleMap = {
             agent: 'Spring AI 2.0 · Agent 工具模式（黑盒）',
             react: 'ReAct 推理模式 · 手写循环 · 每步可见',
             compare: '两两对比模式 · Agent vs ReAct',
             plan: 'Plan-then-Execute · 先规划再并行执行 · 每步可见',
+            graph: 'StateGraph 图编排 POC · spring-ai-alibaba-graph · 与 Plan 对标',
             rag: 'Spring AI 2.0 · RAG 知识库模式'
         };
         const subEl = document.querySelector('.sidebar-subtitle');
@@ -2898,7 +2903,9 @@
             ? '对比模式：输入问题后，Agent 与 ReAct 将同时回答...'
             : mode === 'plan'
                 ? '规划模式：先由 Planner 生成计划，再并行执行工具，最后统一综合回答...'
-                : '有什么可以帮你的？输入问题或指令...';
+                : mode === 'graph'
+                    ? 'Graph 模式：StateGraph 图编排（planner → executor 自环 → solver），与 Plan 模式对比...'
+                    : '有什么可以帮你的？输入问题或指令...';
         // 空对话时刷新欢迎页，让标题/引导卡片跟随当前模式（否则切模式后页面展示还是旧的）
         const curChat = getCurrentChat();
         if (curChat && (!curChat.messages || curChat.messages.length === 0)) {
@@ -2951,6 +2958,11 @@
                     logo: '📋',
                     title: '你好，我是规划式 Agent（Plan-then-Execute）',
                     subtitle: 'Planner 先规划 → Executor 并行执行工具 → Solver 统一综合 · 每步可见'
+                },
+                graph: {
+                    logo: '🧭',
+                    title: '你好，我是 Graph 图编排 Agent（POC）',
+                    subtitle: 'spring-ai-alibaba-graph · StateGraph 节点+条件边驱动流程 · 与 Plan 模式对比'
                 },
                 rag: {logo: '📚', title: '你好，我是知识库助手', subtitle: '纯 RAG 检索 · 基于文档回答'}
             }[currentMode] || {
@@ -3108,7 +3120,9 @@
     function renderReActSteps(steps, streaming, mode) {
         if (!steps || !steps.length) return '';
         const isPlan = mode === 'plan';
-        const boxTitle = isPlan ? '📋 执行步骤（Plan-then-Execute）' : '🧠 ReAct 推理步骤';
+        const isGraph = mode === 'graph';
+        const boxTitle = isPlan ? '📋 执行步骤（Plan-then-Execute）'
+            : isGraph ? '🧭 执行步骤（StateGraph 图编排）' : '🧠 ReAct 推理步骤';
         const lastActiveIdx = streaming ? steps.reduce((acc, s, i) => (s.thoughtStreaming || s.actionLoading) ? i : acc, -1) : -1;
         const stepsHtml = steps.map((s, idx) => {
             const hasRealDuration = s.durationMs != null && s.durationMs > 0;
@@ -3221,6 +3235,7 @@
         if (meta.queryRewritten) parts.push('🔄 查询已改写');
         if (meta.mode === 'react') parts.push('🧠 ReAct');
         if (meta.mode === 'plan') parts.push('📋 Plan-Execute');
+        if (meta.mode === 'graph') parts.push('🧭 Graph');
         if (!parts.length) return '';
         return `<div class="stats-bar">${parts.join(' · ')}</div>`;
     }
@@ -3308,8 +3323,8 @@
                 sessionId: chat.id
             };
 
-            if (currentMode === 'react' || currentMode === 'plan') {
-                // ===== ReAct / Plan 模式：走 SSE 流式（Plan 复用同一套事件渲染）=====
+            if (currentMode === 'react' || currentMode === 'plan' || currentMode === 'graph') {
+                // ===== ReAct / Plan / Graph 模式：走 SSE 流式（事件渲染同一套）=====
                 chat.messages[botIdx] = {
                     role: 'bot',
                     content: '',
@@ -3325,7 +3340,9 @@
                 saveChats();
                 renderChat();
 
-                const endpoint = currentMode === 'react' ? '/ai/react-agent-chat-stream' : '/ai/plan-chat-stream';
+                const endpoint = currentMode === 'react' ? '/ai/react-agent-chat-stream'
+                    : currentMode === 'graph' ? '/ai/graph-chat-stream'
+                    : '/ai/plan-chat-stream';
                 const res = await authFetch(endpoint, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json', 'Accept': 'text/event-stream'},
@@ -3985,6 +4002,7 @@
             react: 'ReAct 推理中（Thought → Action → Observation）...',
             compare: '双模式对比中（Agent + ReAct 同时推理）...',
             plan: '规划执行中（Planner → Executor → Solver）...',
+            graph: '图编排执行中（planner → executor 自环 → solver）...',
             rag: '知识库检索中...'
         };
         $('statusText').textContent = loading ? (labelMap[currentMode] || '思考中...') : '就绪';

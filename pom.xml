@@ -95,6 +95,16 @@
             <artifactId>spring-ai-tika-document-reader</artifactId>
         </dependency>
 
+        <!-- Spring AI Alibaba Graph（图编排 POC 验证，对标手写 Plan-Execute）
+             版本说明：2.0.0-M1.1 是唯一面向 Spring AI 2.x 的版本（里程碑版），
+             其传递的 spring-ai-* 依赖由本项目 spring-ai-bom 2.0.0 GA 统一压版；
+             若与 GA 存在 API 漂移导致运行时报错，摘除本依赖与 GraphAgentAppService 即可回退。 -->
+        <dependency>
+            <groupId>com.alibaba.cloud.ai</groupId>
+            <artifactId>spring-ai-alibaba-graph-core</artifactId>
+            <version>2.0.0-M1.1</version>
+        </dependency>
+
         <!-- Spring Data JPA for Document Version Management -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
