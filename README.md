@@ -1,6 +1,6 @@
 # 智能运维 RAG + Agent 一体化平台
 
-> 基于 Spring Boot 4.0.7 + Spring AI 2.0.0 GA + JDK 21 的企业级知识库问答与智能 Agent 平台。采用 **DDD 四层 + 六边形（Port-Adapter）** 架构，内置 **五种工作模式**：原生 Tool Calling Agent / 手动 ReAct 循环 / **Plan-then-Execute 规划模式** / 对比模式 / 纯 RAG 知识库。具备**混合检索**（向量 + 关键词线性加权融合）、**启发式路由 + 影子路由比对**、**Prompt Injection 防护**、**文档版本状态机**、**决策链路全审计**、**Basic Auth + Session 登录** 等完整能力，同时适配本地 Ollama（离线）与阿里云百炼 DashScope（云端）双后端。
+> 基于 Spring Boot 4.0.7 + Spring AI 2.0.0 GA + JDK 21 的企业级知识库问答与智能 Agent 平台。采用 **DDD 四层 + 六边形（Port-Adapter）** 架构，内置 **六种工作模式**：原生 Tool Calling Agent / 手动 ReAct 循环 / **Plan-then-Execute 规划模式** / **Graph 图编排模式（POC）** / 对比模式 / 纯 RAG 知识库。具备**混合检索**（向量 + 关键词线性加权融合）、**启发式路由 + 影子路由比对**、**Prompt Injection 防护**、**会话滚动摘要 + Redis 持久化**、**文档版本状态机**、**决策链路全审计**、**Basic Auth + Session 登录** 等完整能力，同时适配本地 Ollama（离线）与阿里云百炼 DashScope（云端）双后端。
 
 ---
 
@@ -14,6 +14,9 @@
 | **🤖 原生 Tool Calling** | Spring AI 2.0 官方 Tool Calling 循环（`ToolCallingAdvisor` 自动执行） | `@Tool` 注解自动注册 8 个工具（设备/能耗/时间/天气）；工具调用次数上限经 `TracingToolCallback + ToolCallBudget` **真正强制执行**（`agent.max-tool-calls`，2.0.0 GA 尚无官方 limits）；附带 **TextToolCallParser** 兜底识别模型把调用写成文本 JSON 的场景 |
 | **🧠 手动 ReAct 循环** | Thought → Action → Observation 全流程 | `ReActAgentAppService` 手写 ReAct 循环；每一步严格 JSON 格式解析；支持 **SSE 流式推送**（step_start → thought_delta → action_start → final_delta → done），端点直接返回 `Flux<ServerSentEvent>` |
 | **📋 Plan-then-Execute** | 先规划 → 并行执行 → 一次综合 | `PlanThenExecuteAppService` 三个阶段：Planner 一次产出完整计划（ReWOO `$N` 占位符引用后续步骤产物）→ Executor 拓扑调度、无依赖步骤并行 → Solver 一次 LLM 综合全部 Observation；普通版 + SSE 流式双入口 |
+| **🧭 Graph 图编排（POC）** | spring-ai-alibaba-graph StateGraph 验证 | `GraphAgentAppService` 用图框架重写 Plan-Execute-Solve：planner → executor **自环**（条件边驱动）→ solver；中间数据全部放 `OverAllState`（9 个自定义状态键 + KeyStrategy 合并策略）；与手写版 A/B 对比用，独立端点 `/ai/graph-chat-stream`，验证完可整体摘除 |
+| **💬 会话滚动摘要** | 窗口裁剪前压缩旧轮次，长对话不失忆 | `SpringAiConversationStore.compactBeforeAdd()`：窗口将溢出时，把将被挤出的**完整轮次**用轻量 LLM 压缩成 ≤300 字要点（复用 Query 改写后端），作为伪消息对随历史返回；失败/超时静默回退纯窗口模式 |
+| **💾 会话持久化** | memory / redis 双模式 | `agent.memory.persistence` 开关：`memory`=进程内（默认行为）；`redis`=自研 `RedisChatMemoryRepository`（原生 String/List/Set，**任何 Redis 版本可用**，官方实现依赖 RediSearch 模块），键带原生 TTL 自动过期，**重启恢复、多副本共享**，滚动摘要一并持久化 |
 | **🔀 对比模式** | Agent vs ReAct 同请求双跑 | `POST /ai/compare-chat` 一份请求同时跑两条链路，返回 agent / react 两份完整结果（answer、sources、steps、elapsedMs），用于效果评估 |
 | **⚡ 启发式路由** | FORCE_EXEC / RECOMMEND_LLM 双策略 | 列出设备、近 N 天能耗等高频纯工具场景，FORCE_EXEC 直接跳检索跳 LLM；**领域实词与追问标记分离判定，防止"如何创建用户呢"被误判为同话题** |
 | **👥 影子路由** | 正则 vs LLM 异步灰盒比对 | 每次请求异步多问一次「LLM 会选哪个工具」，7 种判定结果写入 AgentTrace；**复用 QueryRewrite 轻量后端**，验证完可一键关闭或抽样 |
@@ -31,6 +34,7 @@
 |------|------|---------|
 | 语言 / 框架 | JDK 21 · Spring Boot **4.0.7** GA · Spring Framework 7.0.8 | JDK 必须 21+ |
 | AI 框架 | Spring AI **2.0.0** GA（groupId `org.springframework.ai`） | 含 `spring-ai-rag` 模块（预留后续 BM25/RRF 升级接口） |
+| 图编排（POC） | spring-ai-alibaba-graph-core **2.0.0-M1.1** | 唯一面向 Spring AI 2.x 的版本（里程碑版）；传递 spring-ai 依赖由本项目 BOM 2.0.0 GA 压版，实测无冲突 |
 | 聊天模型 | 三选一：Ollama `qwen2.5:1.5b` / DashScope `qwen3.7-plus` / 任意 OpenAI 兼容协议 | 支持混用：聊天/改写/向量各选各的后端 |
 | 向量化模型 | 推荐 Ollama `bge-m3`（默认）或 `nomic-embed-text`，或 DashScope `text-embedding-v3` | docker-compose 默认 `bge-m3` |
 | 向量库 | SimpleVectorStore + JSON 持久化（`uploads/vectorstore.json`） | 通过 `VectorStorePort` 可无缝切换 PGVector/Milvus/RedisSearch |
@@ -52,6 +56,7 @@ src/main/java/com/example/ragassitant/
 │   │   ├── AgentAppService             # 三路编排：闲聊短路 → FORCE_EXEC → 原生 Tool Calling
 │   │   ├── ReActAgentAppService        # 手动 ReAct 循环：普通 + SSE 流式 双入口
 │   │   ├── PlanThenExecuteAppService   # Planner → Executor(并行) → Solver 三段式：普通 + SSE 流式
+│   │   ├── GraphAgentAppService        # 【POC】StateGraph 图编排：planner→executor自环→solver，SSE 流式
 │   │   ├── RagAppService               # 混合检索（线性加权 + 幻觉防护四级闸门）
 │   │   ├── IngestAppService            # 文件分派 → 切分 → 向量入库（全量/单文档增量）
 │   │   ├── DocumentAppService          # 文档版本状态机 + 发布时向量清理
@@ -76,6 +81,8 @@ src/main/java/com/example/ragassitant/
 │   ├── vector/     SpringAiSimpleVectorAdapter  # deleteAll / deleteByDocId 增量清理
 │   ├── tsdb/       InfluxDB18TimeSeriesAdapter  # 内置 8 台演示设备 + 按日聚合查询 + 模拟数据回退
 │   ├── session/    SpringAiConversationStore   # 官方 ChatMemory（MessageWindowChatMemory）+ TTL 定时清理（@Scheduled）
+│   │                                        # + 滚动摘要（窗口裁剪前压缩旧轮次）+ memory/redis 双模式持久化
+│   │                                        # + RedisChatMemoryRepository（自研，原生 Redis 命令，无 RediSearch 依赖）
 │   │                                        # InMemoryConversationStore 为旧手搓实现，仅留作对照/测试，未注册 Bean
 │   ├── agent/
 │   │   ├── DeviceTools.java             # 8 个 @Tool 方法（设备/能耗/时间/天气）
@@ -108,15 +115,16 @@ src/main/java/com/example/ragassitant/
 
 ---
 
-## 💡 核心逻辑详解一：Agent 五种实现 + 三路编排
+## 💡 核心逻辑详解一：Agent 六种实现 + 三路编排
 
-### 1. 五种 Agent 实现对比
+### 1. 六种 Agent 实现对比
 
 | 模式 | 实现类 | 循环方式 | 适用模型 | 流式输出 |
 |------|-------|---------|---------|---------|
 | **Spring AI 原生 Tool Calling** | `AgentAppService` | `ChatClient` + `ToolCallingAdvisor` 框架内部循环（次数受 `ToolCallBudget` 硬限制） | 支持 function calling：qwen3.7-plus / gpt-4o-mini 等 | ❌ 返回最终结果 |
 | **手动 ReAct 循环** | `ReActAgentAppService` | 手写 `for (step 1..maxSteps)` + 严格 JSON 解析 | 不支持 function calling 的小模型：qwen2.5:1.5b 等 | ✅ SSE 逐 thought/action 推送 |
 | **Plan-then-Execute** | `PlanThenExecuteAppService` | Planner 一次规划 → Executor 并行执行 → Solver 一次综合 | 中等模型以上效果更佳（需要一次产出多步计划） | ✅ SSE 逐步骤 + 最终 token 流式 |
+| **Graph 图编排（POC）** | `GraphAgentAppService` | StateGraph 节点+条件边驱动：executor 自环串行执行（框架游走） | 同 Plan 模式 | ✅ SSE 逐步骤（答案一次性推送） |
 | **对比模式** | 后端 `compareChat` 双跑 | 同请求并行调 `AgentAppService` + `ReActAgentAppService` | 任意 | ❌ 返回两者完整 JSON |
 | **纯 RAG 知识库** | `RagAppService` | 改写 → 混合检索 → 幻觉四级闸门 → 单次 LLM | 任意 | ❌ 返回 answer + sources |
 
@@ -246,6 +254,34 @@ src/main/java/com/example/ragassitant/
 `PromptBuilder.buildPlanSolverSystemPrompt` 把「工具执行结果」+「RAG 资料」一次性给全，只调一次 LLM 生成最终答案。数据有硬约束：设备/能耗数据必须来自工具结果、文档内容必须来自 RAG 资料，禁止编造。
 
 > **何时 Solver 没有工具可依赖**：Planner 输出 `"steps":[]`（如纯知识库问题），则 Solver 仅凭 RAG 上下文回答；Planner 异常时回退为直接 Solver。
+
+### 4. Graph 图编排模式（POC，与手写 Plan 版对标）
+
+用 [spring-ai-alibaba-graph](https://github.com/alibaba/spring-ai-alibaba) 的 `StateGraph` 把同一套 Planner→Executor→Solver 流程重新表达一遍，**验证「图框架 vs 手写编排」的差异**。业务代码一行没动，通过独立端点并行存在：
+
+```
+              ┌──────────┐  有计划   ┌──────────┐  还有步骤  (自环)
+   START ──→ │ planner  │ ───────→ │ executor │ ────────→ executor
+              └──────────┘          └──────────┘  没有步骤 ↓
+                   │ 无计划                  ┌────────┐
+                   └────────────────────→   │ solver │ ──→ END
+                                            └────────┘
+```
+
+| 维度 | 手写 Plan 版 | Graph 版 |
+|------|------------|---------|
+| 流程控制 | doChat 里手写 while 拓扑调度 | 节点 + 条件边 + executor 自环，框架游走驱动 |
+| 中间状态 | 方法局部变量 | `OverAllState` 图级共享（9 个自定义键，Replace/Append 合并策略） |
+| 工具并行 | ✅ 无依赖步骤按波并行 | ❌ POC 串行自环（框架也支持并行分支，暂未启用） |
+| 答案流式 | ✅ solver token 打字机 | ❌ solver 阻塞生成完一次性推送 |
+| 可观测 | AgentTrace 阶段记录 | 同样写 trace（framework=GRAPH_STATE_GRAPH）+ 启动打印 Mermaid 图 |
+
+**验证要点**：同一问题分别走 `/ai/plan-chat-stream` 与 `/ai/graph-chat-stream`，对比答案质量、事件流、总耗时。Graph 的价值在动态分支 / 人工介入 / 断点续跑等复杂场景，固定三段流水线手写版更简单高效。验证完不满意，删掉 pom 中 1 个依赖 + `GraphAgentAppService` + Controller 端点即可零残留回退。
+
+**会话滚动摘要 + Redis 持久化**（`SpringAiConversationStore`，所有 Agent 模式共用）：
+
+- **滚动摘要**：`memory-size` 窗口将溢出时，先把将被挤出的完整轮次用轻量 LLM 压缩成 ≤300 字要点（与旧摘要累积合并），作为伪消息对随 `getHistory()` 返回——模型能"看到"已被裁掉的早期内容。执行顺序关键：**先取旧摘要 → clear 窗口 → 最后写新摘要**（redis 模式下 clear 会连 summary 键一起删，顺序反了摘要即失）
+- **持久化**：`agent.memory.persistence=memory|redis`。redis 模式用自研 `RedisChatMemoryRepository`（原生 String/List/Set 命令，键 `rag:chat:msg:*` / `rag:chat:summary:*`，TTL=`session-ttl-minutes` 自动过期）——**任何 Redis 版本可用**；官方 `RedisChatMemoryRepository` 依赖 RediSearch 模块（仅 Redis Stack / 8.0+ 内置），普通 Redis 会报 unknown command，故弃用。重启后历史自动恢复、多副本共享
 
 ---
 
@@ -425,7 +461,27 @@ Executor（拓扑调度，事件逐个推送）：
 Solver：solve_start → final_delta*N（最终答案按 token 打字机）→ done
 ```
 
-**SSE 事件序列一览**（ReAct 与 Plan 共用前端 `handleSseEvent` / `renderReActSteps` 渲染）：
+### 5. Graph 图编排 + SSE 流式（`/ai/graph-chat-stream`，POC）
+
+```
+用户提问
+   │
+   ├─ 闲聊短路 / Prompt Injection：同一套判定（图外完成）
+   │
+   ▼
+buildGraph() 编译 StateGraph → inputs 灌 9 个状态键 → subscribe() 点火
+   │
+   ▼
+框架游走：planner（静默出计划）→ 条件边 → executor 自环×N → solver → END
+   │
+   ▼
+每个节点完成吐一个 NodeOutput → translateNodeOutput 翻译成对齐事件：
+   executor 每圈 → step_start → thought_end → action_start → action_end
+   solver 完成   → final_delta（答案整段一次性）
+   → doFinally: 存会话历史 + done
+```
+
+**SSE 事件序列一览**（ReAct / Plan / Graph 共用前端 `handleSseEvent` / `renderReActSteps` 渲染）：
 
 | 事件名 | 触发时机 | 负载 |
 |-------|---------|------|
@@ -522,7 +578,7 @@ docker compose down
 
 | 页面 | 地址 | 说明 |
 |------|------|------|
-| **聊天首页** | http://localhost:8900/ | **五种模式**（Agent / ReAct / 对比 / Plan-then-Execute / 知识库）+ 多会话历史，模式随会话记忆 |
+| **聊天首页** | http://localhost:8900/ | **六种模式**（Agent / ReAct / 对比 / Plan-then-Execute / 🧭 Graph / 知识库）+ 多会话历史，模式随会话记忆 |
 | **知识库管理** | http://localhost:8900/docs.html | 文档上传、版本列表、发布/归档、加入知识库、全量重建 |
 | **决策链路审计** | http://localhost:8900/agent-trace.html | Agent 每轮决策可视化、工具入参出参回放、影子路由统计 |
 | **H2 控制台** | http://localhost:8900/h2-console | JDBC `jdbc:h2:file:./data/ragdb`，用户名 `sa` 密码空 |
@@ -543,7 +599,15 @@ agent:
                                                 # 【已真正生效】经 TracingToolCallback + ToolCallBudget 强制执行
                                                 # （2.0.0 GA 的 DefaultToolCallingManager 尚无官方 limits，后续版本可平滑切换）
   memory-size: ${AGENT_MEMORY_SIZE:20}          # 每个会话最多带入多少轮历史（官方 MessageWindowChatMemory 窗口 = 本值 × 2 条消息）
-  session-ttl-minutes: ${AGENT_SESSION_TTL_MIN:120}   # 会话内存保留时长
+
+  # === 会话持久化 + 滚动摘要 ===
+  memory:
+    persistence: ${AGENT_MEMORY_PERSISTENCE:memory}   # memory=进程内 / redis=持久化（重启恢复、多副本共享）
+  memory-summary:
+    enabled: ${AGENT_MEMORY_SUMMARY_ENABLED:true}     # 窗口裁剪前把旧轮次压缩成要点（复用 Query 改写后端）
+    max-prompt-chars: ${AGENT_SUMMARY_MAX_PROMPT:6000}
+
+  session-ttl-minutes: ${AGENT_SESSION_TTL_MIN:120}   # 会话内存保留时长（redis 模式同时是键 TTL）
   max-sessions: ${AGENT_MAX_SESSIONS:500}       # 最多同时保留会话数
   session-cleanup-interval-ms: 600000           # 定时清理周期（默认 10 分钟，@Scheduled 触发）
 
@@ -617,7 +681,20 @@ spring:
 
 > ⚠️ **安全提醒**：`application-ai.yml` 里 `openai.api-key` 请通过环境变量 `DASHSCOPE_API_KEY` 注入，**不要提交真实 Key 到仓库**，避免密钥泄漏。启动时会打印脱敏后的 LLM 配置总览供核对。
 
-### ④ 登录认证（`application-auth.yml`）
+### ④ Redis 连接（`application-storage.yml`，persistence=redis 时使用）
+
+```yaml
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:192.168.221.130}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 3s
+```
+> Lettuce 懒连接：配错地址不影响启动，首次读写会话时才报错。启用：`AGENT_MEMORY_PERSISTENCE=redis`。
+
+### ⑤ 登录认证（`application-auth.yml`）
 
 ```yaml
 auth:
@@ -640,6 +717,7 @@ auth:
 | `POST` | `/ai/react-agent-chat-stream` | **ReAct SSE 流式**：step_start → thought_delta → action_start → final_delta → done；端点返回 `Flux<ServerSentEvent>`（Spring MVC 原生支持 Reactor 返回值，无需 WebFlux） |
 | `POST` | `/ai/plan-chat` | **Plan-then-Execute 普通版**：返回计划步骤 + 执行步骤 + Solver 综合答案 |
 | `POST` | `/ai/plan-chat-stream` | **Plan SSE 流式**：step_start → thought_end → action_start → action_end → solve_start → final_delta → done；同样返回 `Flux<ServerSentEvent>` |
+| `POST` | `/ai/graph-chat-stream` | **【POC】Graph 图编排 SSE 流式**：StateGraph（planner→executor自环→solver）驱动，事件序列与 Plan 对齐，mode="graph"；与 `/ai/plan-chat-stream` A/B 对比用 |
 | `POST` | `/ai/compare-chat` | **对比模式**：同请求跑 Agent + ReAct 两条链路，返回 agent/react 两份完整结果 |
 | `POST` | `/ai/ingest` | **全量重建**：清空向量库 → 加载 `classpath:docs/**/*` 全部文档（别名 `/ai/ingestAll`） |
 | `POST` | `/ai/ingest/{versionId}` | **单版本入库**：只删除该文档历史向量 → 切片入库（增量） |
@@ -724,7 +802,11 @@ auth:
 | IAM 权限 / 登录接口 401 / 页面提示未认证 | 默认账号密码被改 / 认证开关打开 | 用 `AUTH_USERNAME` / `AUTH_PASSWORD` / `AUTH_ENABLED` 环境变量控制 |
 | 模型把 JSON 数组当最终答案返回（显示 `[}]` 三个字符） | 小模型把工具调用写成文本，没走原生通道 | AgentAppService 已有 `TextToolCallParser` 兜底；切 qwen3.7-plus 这类支持 function calling 的更佳 |
 | Agent 反复调用工具停不下来 / 工具费用失控 | 旧版 `agent.max-tool-calls` 只打日志、从未真正限制循环 | 已修复：`TracingToolCallback + ToolCallBudget` 按配置硬性扣减，耗尽即中断循环并返回提示（升级到含官方 limits 的版本后可换 `spring.ai.tools.limits.*`） |
-| 多副本部署时会话上下文丢失 | 会话记忆当前为进程内 `InMemoryChatMemoryRepository` | 把 `SpringAiConversationStore` 构造里的 Repository 换成官方 `JdbcChatMemoryRepository` 即可，其余代码零改动 |
+| 多副本部署时会话上下文丢失 | 会话记忆默认进程内 | 已支持：`AGENT_MEMORY_PERSISTENCE=redis` 切自研 Redis 仓库（任何 Redis 版本可用；官方实现依赖 RediSearch 模块，普通 Redis 会报 unknown command） |
+| redis 模式下重启后审计页会话清单为空 / 摘要丢失 | 旧版本 `lastAccess` 表为空时直接返回 | 已修复：重启后以 Redis 会话索引为准恢复追踪，摘要从 Redis 读回 |
+| 会话滚动摘要不出现（redis 模式） | 旧版本 compact 顺序错误：先写摘要再 clear 窗口，clear 连带删除 summary 键 | 已修复：先取旧摘要 → clear → 最后写新摘要；日志搜 `📝 会话滚动摘要` 验证 |
+| Graph 模式比 Plan 模式慢 | POC 两处有意简化：executor 串行自环（Plan 是并行）；solver 整段生成完才推（Plan 是 token 打字机） | 属 POC 预期行为，验证的是图框架机制而非性能；优化方向见 `GraphAgentAppService` 注释 |
+| Graph 审计记录落在「(无会话)」分组 | 旧版本节点内 sessionId 返回空串 | 已修复：sessionId 作为状态键（session_id）随 inputs 灌入图，节点内读取 |
 | Plan 模式执行停滞 / 全部步骤标失败 | Planner 产出了循环依赖或引用了不存在的步骤 | 日志搜 `⚠️ Plan 执行停滞`，已安全降级为标记失败；换更强模型规划 |
 | "mv-003呢" 查能耗，下一条"你是什么模型"还在调能耗 | 老版本 `HeuristicRouter` 误判 | 已修复：TOPIC_SWITCH_CHAT_PATTERN + 追问剥除残长判定 + 闲聊前置短路 |
 | Query 改写永远"超时回退" | 改写后端用了推理模型，先思考撞超时 | 配非推理模型 + 调大 `rag.query-rewrite.timeout-ms` |
@@ -741,8 +823,9 @@ auth:
 
 | 方向 | 切入点 | 说明 |
 |------|--------|------|
+| Graph 编排转正 | `GraphAgentAppService` | POC 验证通过后：启用并行分支边对标 Plan 的拓扑并行 + solver 接 `StreamingOutput` 做 token 流式；或反向摘除（删 1 依赖 + 1 类 + 1 端点，零残留） |
 | 向量库升级 PGVector / Milvus / RedisSearch | `VectorStorePort` 新增实现 | 配置里替换 `@Primary` Bean 即可，Rag/Ingest 代码零改动 |
-| 会话记忆持久化 / 多副本共享 | `SpringAiConversationStore` 换 `JdbcChatMemoryRepository` | 官方 ChatMemory Repository 抽象，H2/MySQL/PG 方言齐备；TTL/容量淘汰逻辑无需改动 |
+| 会话记忆换 JdbcChatMemoryRepository | `SpringAiConversationStore` | 官方 ChatMemory Repository 抽象，H2/MySQL/PG 方言齐备；TTL/容量淘汰/摘要逻辑无需改动 |
 | OCR 扫描件 / 图片入库 | `DocumentReaderPort` 扩展 OCR Adapter | Tika 基础已就绪，加 PaddleOCR / 阿里云 OCR 包装一层 |
 | 熔断限流缓存 | 加 Resilience4j + Redis AOP | LLM 调用、能耗查询都是高延迟外部 IO，适合加缓存 1min |
 | MCP 协议对接外部系统工具 | `ToolRegistryPort` → 包 MCP ToolServer | DeviceTools 8 个方法直接暴露成 MCP Server 端点 |

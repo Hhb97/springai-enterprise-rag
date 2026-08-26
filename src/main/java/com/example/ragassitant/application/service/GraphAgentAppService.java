@@ -39,8 +39,12 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 基于 <b>spring-ai-alibaba-graph</b>（StateGraph 图编排）的 Plan-Execute-Solve Agent。
@@ -86,6 +90,14 @@ public class GraphAgentAppService {
     static final String K_ANSWER = "answer";
     static final String K_SESSION_ID = "session_id";
 
+    /** 波内并行执行工具的线程池（对齐手写版 PlanThenExecuteAppService 的调度语义）。 */
+    private static final ExecutorService TOOL_EXECUTOR = Executors.newFixedThreadPool(
+            Math.max(2, Runtime.getRuntime().availableProcessors()), r -> {
+                Thread t = new Thread(r, "graph-tool-worker");
+                t.setDaemon(true);
+                return t;
+            });
+
     /** SSE 流式专用线程池：一个请求一条 worker（与 Plan/ReAct 版同款模式）。 */
     private static final ExecutorService STREAM_EXECUTOR = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "graph-stream-worker");
@@ -101,6 +113,14 @@ public class GraphAgentAppService {
     private final ToolCatalog toolCatalog;
     private final AgentProperties props;
     private final AgentRequestPreparer requestPreparer;
+
+    /**
+     * 编译后的图，构造时建好后复用。
+     *
+     * <p>图结构是静态的（节点与边都不随请求变化），原实现在每个请求线程里重新 buildGraph()，
+     * 等于每次请求都白付一次编译开销。
+     */
+    private volatile CompiledGraph compiledGraph;
 
     public GraphAgentAppService(LlmPort llmPort,
                                 ConversationStorePort conversationStorePort,
@@ -120,7 +140,8 @@ public class GraphAgentAppService {
         this.requestPreparer = requestPreparer;
         log.info("🧭 GraphAgentAppService 初始化完成（spring-ai-alibaba-graph StateGraph POC）");
         try {
-            log.info("🧭 图结构(Mermaid):\n{}", buildGraph().getGraph(GraphRepresentation.Type.MERMAID).content());
+            this.compiledGraph = buildGraph();
+            log.info("🧭 图结构(Mermaid):\n{}", this.compiledGraph.getGraph(GraphRepresentation.Type.MERMAID).content());
         } catch (Throwable t) {
             // 图结构日志属于锦上添花；graph 库与 Spring AI GA 存在 API 漂移时也不能阻断启动
             log.warn("🧭 StateGraph 构建/渲染失败（首次请求时将再次尝试）: {}", t.toString());
@@ -154,11 +175,11 @@ public class GraphAgentAppService {
             graph.addEdge(StateGraph.START, "planner");
             // 条件边：Planner 出了计划走 executor，空计划（纯 RAG/闲聊）直接 solver
             graph.addConditionalEdges("planner", AsyncEdgeAction.edge_async(state ->
-                            hasRemainingSteps(state, readCursor(state)) ? "executor" : "solver"),
+                            hasRemainingSteps(state) ? "executor" : "solver"),
                     Map.of("executor", "executor", "solver", "solver"));
             // 自环边：一次执行一步，直到 cursor 走完计划
             graph.addConditionalEdges("executor", AsyncEdgeAction.edge_async(state ->
-                            hasRemainingSteps(state, readCursor(state)) ? "executor" : "solver"),
+                            hasRemainingSteps(state) ? "executor" : "solver"),
                     Map.of("executor", "executor", "solver", "solver"));
             graph.addEdge("solver", StateGraph.END);
 
@@ -202,41 +223,98 @@ public class GraphAgentAppService {
         };
     }
 
-    /** 阶段二（每次自环执行一步）：取 cursor 指向的步骤 → $N 替换 → 调工具 → 结果写回状态。 */
+    /**
+     * 阶段二：<b>一次自环执行一整波</b>（依赖已满足的步骤），波内并行。
+     *
+     * <p>原 POC 是「一次自环走一步」的串行游标，相对手写版
+     * {@code PlanThenExecuteAppService.executePlan} 是功能倒退 —— 后者按依赖分波、波内并行，
+     * 墙钟时间约等于每波最慢的一步。这里对齐该语义：图的形状不变（仍是自环边），
+     * 只是每次迭代处理的粒度从「一步」变成「一波」。
+     *
+     * <p>完成度不再用游标表示，而是看 {@code K_RESULTS} 是否已覆盖计划里全部 step ——
+     * 并行下步骤不再按顺序完成，游标失去意义；{@code K_CURSOR} 退化为波计数器，仅用于兜底防死循环。
+     *
+     * <p>依赖无法满足（循环依赖 / 引用了不存在的步骤）时，把剩余步骤标记失败并写入结果池，
+     * 让自环条件立刻变假、转入 solver，而不是空转。失败步骤的错误文本照样进结果池：
+     * 依赖方经 {@code $N} 引用时拿到的是错误说明而非空串，Solver 才能如实报告哪一步失败了。
+     */
     private NodeAction executorNode() {
         return state -> {
-            long start = System.currentTimeMillis();
+            long waveStart = System.currentTimeMillis();
             List<PlanStep> plan = readPlan(state);
-            int cursor = readCursor(state);
-            @SuppressWarnings("unchecked")
-            Map<Integer, String> results = (Map<Integer, String>) state.value(K_RESULTS).orElse(new HashMap<>());
+            int wave = readCursor(state);
 
-            PlanStep s = plan.get(cursor);
-            Map<String, Object> resolvedArgs = resolvePlaceholders(s.arguments, results);
-            String observation;
-            String error = null;
-            try {
-                observation = toolRegistry.invoke(new ToolCall(s.tool, resolvedArgs));
-            } catch (Exception e) {
-                observation = "❌ 工具 " + s.tool + " 执行失败: " + e.getMessage();
-                error = e.getMessage();
+            // 并行写入必须用并发容器：原实现把 HashMap 取出来原地改再放回，
+            // 串行下没问题，一旦波内并行就是数据竞争。
+            Map<Integer, String> results = new ConcurrentHashMap<>(readResults(state));
+
+            List<PlanStep> ready = plan.stream()
+                    .filter(s -> !results.containsKey(s.step))
+                    .filter(s -> s.dependsOn == null || s.dependsOn.stream().allMatch(results::containsKey))
+                    .toList();
+
+            List<Map<String, Object>> waveTraces = new ArrayList<>();
+
+            if (ready.isEmpty() || wave >= MAX_PLAN_STEPS) {
+                String reason = ready.isEmpty()
+                        ? "依赖无法满足（循环依赖或引用了不存在的步骤），跳过执行"
+                        : "超过最大波次 " + MAX_PLAN_STEPS + "，强制结束";
+                for (PlanStep s : plan) {
+                    if (results.containsKey(s.step)) continue;
+                    results.put(s.step, "❌ " + reason);
+                    waveTraces.add(buildStepTrace(s.step, s.tool, s.arguments, null, reason, 0));
+                }
+                log.warn("🧭 [executor] 执行停滞：{}，剩余步骤已标记失败", reason);
+                return Map.of(K_RESULTS, results, K_CURSOR, wave + 1, K_TRACES, waveTraces);
             }
-            long ms = System.currentTimeMillis() - start;
-            results.put(s.step, observation);
 
-            traceStore.recordDecision(sessionIdOf(state), 1, "PLAN_EXECUTE",
-                    s.tool, resolvedArgs, observation,
-                    "graph step " + s.step + " (" + (cursor + 1) + "/" + plan.size() + ")",
-                    "depends=" + s.dependsOn, false, "GRAPH_STATE_GRAPH",
-                    ms, error == null ? "OK" : "ERROR", error);
-            log.info("🧭 [executor] 步骤 {}/{}: {} → {} 字结果, 耗时 {}ms",
-                    cursor + 1, plan.size(), s.tool, observation.length(), ms);
+            // 同一波内互不依赖，并行执行；墙钟 ≈ 最慢那一步
+            String sessionId = sessionIdOf(state);
+            List<CompletableFuture<Map<String, Object>>> futures = ready.stream()
+                    .map(s -> CompletableFuture.supplyAsync(
+                            () -> executeOneStep(s, results, sessionId), TOOL_EXECUTOR))
+                    .toList();
 
-            Map<String, Object> trace = buildStepTrace(s.step, s.tool, resolvedArgs, observation, error, ms);
-            return Map.of(K_RESULTS, results, K_CURSOR, cursor + 1, K_TRACES, List.of(trace));
+            for (CompletableFuture<Map<String, Object>> f : futures) {
+                try {
+                    Map<String, Object> trace = f.get(60, TimeUnit.SECONDS);
+                    int step = ((Number) trace.get("step")).intValue();
+                    Object obs = trace.get("observation");
+                    results.put(step, obs == null ? "" : obs.toString());
+                    waveTraces.add(trace);
+                } catch (Exception e) {
+                    log.warn("🧭 [executor] 步骤取结果失败: {}", e.getMessage());
+                }
+            }
+            waveTraces.sort((a, b) -> Integer.compare(
+                    ((Number) a.get("step")).intValue(), ((Number) b.get("step")).intValue()));
+
+            log.info("🧭 [executor] 第 {} 波并行执行 {} 步，耗时 {}ms（累计完成 {}/{}）",
+                    wave + 1, ready.size(), System.currentTimeMillis() - waveStart, results.size(), plan.size());
+            return Map.of(K_RESULTS, results, K_CURSOR, wave + 1, K_TRACES, waveTraces);
         };
     }
 
+    /** 执行单个计划步骤：$N 占位符替换 → 调工具 → 产出 trace。 */
+    private Map<String, Object> executeOneStep(PlanStep s, Map<Integer, String> results, String sessionId) {
+        long start = System.currentTimeMillis();
+        Map<String, Object> resolvedArgs = resolvePlaceholders(s.arguments, results);
+        String observation;
+        String error = null;
+        try {
+            observation = toolRegistry.invoke(new ToolCall(s.tool, resolvedArgs));
+        } catch (Exception e) {
+            observation = "❌ 工具 " + s.tool + " 执行失败: " + e.getMessage();
+            error = e.getMessage();
+        }
+        long ms = System.currentTimeMillis() - start;
+        traceStore.recordDecision(sessionId, 1, "PLAN_EXECUTE",
+                s.tool, resolvedArgs, observation,
+                "graph step " + s.step, "depends=" + s.dependsOn,
+                false, "GRAPH_STATE_GRAPH",
+                ms, error == null ? "OK" : "ERROR", error);
+        return buildStepTrace(s.step, s.tool, resolvedArgs, observation, error, ms);
+    }
     /** 阶段三：汇总 RAG 上下文 + 全部 Observation，一次 LLM 调用出最终答案。 */
     private NodeAction solverNode() {
         return state -> {
@@ -300,7 +378,12 @@ public class GraphAgentAppService {
                     return;
                 }
 
-                CompiledGraph compiled = buildGraph();
+                // 图结构静态，构造时已编译好；构造阶段若失败则这里补建一次
+                CompiledGraph compiled = compiledGraph;
+                if (compiled == null) {
+                    compiled = buildGraph();
+                    compiledGraph = compiled;
+                }
                 Map<String, Object> inputs = new HashMap<>();
                 inputs.put(K_QUESTION, question);
                 inputs.put(K_HISTORY, prep.history());
@@ -313,8 +396,11 @@ public class GraphAgentAppService {
                 inputs.put(K_SESSION_ID, sess);
 
                 StringBuilder answerBuf = new StringBuilder();
+                // K_TRACES 用 AppendStrategy 累加，每波拿到的是全量列表；
+                // 用它去重，保证同一步骤的 SSE 事件只推一次
+                Set<Integer> emittedSteps = ConcurrentHashMap.newKeySet();
                 compiled.stream(inputs)
-                        .doOnNext(out -> translateNodeOutput(out, channel, answerBuf))
+                        .doOnNext(out -> translateNodeOutput(out, channel, answerBuf, emittedSteps))
                         .doOnError(e -> {
                             log.error("🧭 Graph 执行异常", e);
                             channel.emitError(e.getMessage() == null ? "图执行失败" : e.getMessage());
@@ -342,7 +428,8 @@ public class GraphAgentAppService {
      * 契约注意：前端 ensureStep(d.step) 按 1 起始索引存步骤卡片，step 必须为正整数；
      * final_delta 的文本字段名是 delta 而非 text。
      */
-    private void translateNodeOutput(NodeOutput out, StreamChannel channel, StringBuilder answerBuf) {
+    private void translateNodeOutput(NodeOutput out, StreamChannel channel, StringBuilder answerBuf,
+                                     Set<Integer> emittedSteps) {
         String node = out.node();
         OverAllState state = out.state();
         switch (node) {
@@ -351,25 +438,36 @@ public class GraphAgentAppService {
                 log.info("🧭 [SSE] planner 完成: {} 步", plan.size());
             }
             case "executor" -> {
-                int stepNum = readCursor(state); // 自环里 cursor 已 +1，正好是本次的 1-based 序号
+                // 一次自环 = 一整波（可能多步），逐条把本波 traces 翻成 SSE 事件。
+                // 原实现用 cursor 当步号且只取最后一条 trace，波内并行后会丢步骤、步号也对不上；
+                // 现在直接用 trace 里的 step（Planner 给的 1-based 步号），与前端 ensureStep 契约一致。
                 @SuppressWarnings("unchecked")
                 List<Map<String, Object>> traces =
                         (List<Map<String, Object>>) state.value(K_TRACES).orElse(List.of());
                 if (traces.isEmpty()) break;
-                Map<String, Object> t = traces.get(traces.size() - 1);
-                channel.emit("step_start", Map.of("step", stepNum));
-                channel.emit("thought_end", Map.of(
-                        "step", stepNum,
-                        "thought", t.get("thought"),
-                        "tool", t.get("tool")));
-                channel.emit("action_start", Map.of(
-                        "step", stepNum,
-                        "tool", t.get("tool"), "arguments", t.get("arguments")));
-                Map<String, Object> endPayload = new LinkedHashMap<>();
-                endPayload.put("step", stepNum);
-                endPayload.put("observation", t.get("observation"));
-                if (t.containsKey("error")) endPayload.put("error", t.get("error"));
-                channel.emit("action_end", endPayload);
+                int emitted = 0;
+                for (Map<String, Object> t : traces) {
+                    Object stepObj = t.get("step");
+                    if (!(stepObj instanceof Number n)) continue;
+                    int stepNum = n.intValue();
+                    if (emittedSteps.contains(stepNum)) continue;   // K_TRACES 是累加策略，跳过历史波次
+                    emittedSteps.add(stepNum);
+                    emitted++;
+                    channel.emit("step_start", Map.of("step", stepNum));
+                    channel.emit("thought_end", Map.of(
+                            "step", stepNum,
+                            "thought", t.get("thought"),
+                            "tool", t.get("tool")));
+                    channel.emit("action_start", Map.of(
+                            "step", stepNum,
+                            "tool", t.get("tool"), "arguments", t.get("arguments")));
+                    Map<String, Object> endPayload = new LinkedHashMap<>();
+                    endPayload.put("step", stepNum);
+                    endPayload.put("observation", t.get("observation"));
+                    if (t.containsKey("error")) endPayload.put("error", t.get("error"));
+                    channel.emit("action_end", endPayload);
+                }
+                log.info("🧭 [SSE] executor 本波推送 {} 个步骤事件", emitted);
             }
             case "solver" -> {
                 String answer = state.value(K_ANSWER, String.class).orElse("");
@@ -391,8 +489,19 @@ public class GraphAgentAppService {
 
     // ==================== 状态读取辅助 ====================
 
-    private static boolean hasRemainingSteps(OverAllState state, int cursor) {
-        return cursor < readPlan(state).size();
+    /**
+     * 是否还有未完成的计划步骤。
+     *
+     * <p>并行执行后步骤不再按顺序完成，游标无法表示完成度，改为看结果池是否已覆盖全部 step。
+     */
+    private static boolean hasRemainingSteps(OverAllState state) {
+        Map<Integer, String> results = readResults(state);
+        return readPlan(state).stream().anyMatch(s -> !results.containsKey(s.step));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<Integer, String> readResults(OverAllState state) {
+        return state.value(K_RESULTS).map(v -> (Map<Integer, String>) v).orElse(Map.of());
     }
 
     private static List<PlanStep> readPlan(OverAllState state) {
