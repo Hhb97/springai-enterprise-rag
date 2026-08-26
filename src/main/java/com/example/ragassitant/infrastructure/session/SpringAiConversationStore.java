@@ -187,15 +187,21 @@ public class SpringAiConversationStore implements ConversationStorePort {
             }
             if (covered == 0) return;
 
-            // 先摘要（用旧摘要 + 新被裁轮次合成新摘要）
-            mergeSummary(sessionId, transcript.toString());
+            // 【顺序很关键】redis 模式下 chatMemory.clear() 会触发
+            // RedisChatMemoryRepository.deleteByConversationId()，连带删除 summary 键。
+            // 所以必须：clear 前先取出旧摘要 → 清窗口重放剩余消息 → 最后写新摘要。
+            // 若先 mergeSummary 再 clear，刚写入的摘要会被立刻删掉（redis 模式摘要失效的根因）。
+            String prev = readSummary(sessionId);
 
-            // 再定点移除头部 covered 条：clear 后重放剩余消息
+            // 定点移除头部 covered 条：clear 后重放剩余消息
             List<Message> remaining = new ArrayList<>(msgs.subList(covered, msgs.size()));
             chatMemory.clear(sessionId);
             for (Message m : remaining) {
                 chatMemory.add(sessionId, m);
             }
+
+            // 最后摘要（用旧摘要 + 新被裁轮次合成新摘要）
+            mergeSummary(sessionId, prev, transcript.toString());
             String current = readSummary(sessionId);
             log.info("📝 会话滚动摘要: sessionId={}, 压缩 {} 条旧消息, 窗口剩余 {}, 累计摘要长度 {} 字",
                     sessionId, covered, remaining.size(), current == null ? 0 : current.length());
@@ -219,9 +225,13 @@ public class SpringAiConversationStore implements ConversationStorePort {
         }
     }
 
-    /** 用轻量后端把「旧摘要 + 新被裁轮次」合成为新摘要；失败保留旧摘要。 */
-    private void mergeSummary(String sessionId, String evictedTranscript) {
-        String prev = readSummary(sessionId);
+    /**
+     * 用轻量后端把「旧摘要 + 新被裁轮次」合成为新摘要；失败保留旧摘要。
+     *
+     * <p>旧摘要由调用方在 {@code chatMemory.clear()} 之前读出后传入 —— redis 模式下
+     * clear 会连 summary 键一起删除，clear 后再读只能拿到空。
+     */
+    private void mergeSummary(String sessionId, String prev, String evictedTranscript) {
         String clipped = evictedTranscript.length() > summaryMaxPromptChars
                 ? evictedTranscript.substring(evictedTranscript.length() - summaryMaxPromptChars)
                 : evictedTranscript;
