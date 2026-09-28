@@ -3,8 +3,12 @@ package com.example.ragassitant.infrastructure.agent;
 import com.example.ragassitant.domain.model.ToolCall;
 import com.example.ragassitant.domain.service.ToolCallValidator;
 import com.example.ragassitant.domain.spi.ToolRegistryPort;
+import com.example.ragassitant.infrastructure.governance.ToolGovernance;
+import com.example.ragassitant.infrastructure.observability.AgentMetrics;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.stereotype.Component;
 
@@ -12,6 +16,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * 启发式 FORCE_EXEC 路径的工具执行器：按名字反射调用 {@link DeviceTools} 上的 {@code @Tool} 方法。
@@ -30,11 +35,23 @@ public class SpringAiToolRegistry implements ToolRegistryPort {
 
     private final DeviceTools deviceTools;
     private final ToolCallValidator validator;
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    private final ToolGovernance governance;
+    private final AgentMetrics metrics;
     private final Map<String, Method> toolMethods = new HashMap<>();
 
     public SpringAiToolRegistry(DeviceTools deviceTools, ToolCallValidator validator) {
+        this(deviceTools, validator, ToolGovernance.permissive(), AgentMetrics.noop());
+    }
+
+    @Autowired
+    public SpringAiToolRegistry(DeviceTools deviceTools, ToolCallValidator validator,
+                                ToolGovernance governance, AgentMetrics metrics) {
         this.deviceTools = deviceTools;
         this.validator = validator;
+        this.governance = governance;
+        this.metrics = metrics;
         for (Method m : DeviceTools.class.getDeclaredMethods()) {
             if (m.isAnnotationPresent(Tool.class)) {
                 Tool ann = m.getAnnotation(Tool.class);
@@ -67,9 +84,25 @@ public class SpringAiToolRegistry implements ToolRegistryPort {
         String invalid = validator.validate(toolCall.name, resolved);
         if (invalid != null) {
             log.warn("⚠️ 工具 {} 参数校验未通过: {} | 原始参数={}", toolCall.name, invalid, toolCall.arguments);
+            metrics.toolCall(toolCall.name, "registry", "invalid_args");
             return "❌ 参数有误：" + invalid;
         }
 
+        // 治理闸与原生通道共用（见 ToolGovernance）：FORCE_EXEC / Plan / ReAct 绕不过它
+        return governance.execute(toolCall.name, canonicalArgs(resolved), "registry",
+                () -> doInvoke(toolCall.name, method, resolved));
+    }
+
+    /** 参数按键排序后序列化，保证同样的参数得到同样的幂等键。 */
+    private static String canonicalArgs(Map<String, Object> resolved) {
+        try {
+            return JSON.writeValueAsString(new TreeMap<>(resolved));
+        } catch (Exception e) {
+            return String.valueOf(new TreeMap<>(resolved));
+        }
+    }
+
+    private String doInvoke(String toolName, Method method, Map<String, Object> resolved) {
         try {
             Class<?>[] paramTypes = method.getParameterTypes();
             Object[] callArgs = new Object[paramTypes.length];
@@ -78,10 +111,12 @@ public class SpringAiToolRegistry implements ToolRegistryPort {
                 callArgs[i] = val == null ? defaultForType(paramTypes[i]) : convertType(val, paramTypes[i]);
             }
             Object ret = method.invoke(deviceTools, callArgs);
+            metrics.toolCall(toolName, "registry", "ok");
             return ret != null ? ret.toString() : "(工具无返回)";
         } catch (Exception e) {
-            log.error("❌ 工具 {} 调用失败", toolCall.name, e);
-            return "❌ 工具 " + toolCall.name + " 执行失败: " + (e.getCause() != null ? e.getCause().getMessage() : e.getMessage());
+            log.error("❌ 工具 {} 调用失败", toolName, e);
+            metrics.toolCall(toolName, "registry", "error");
+            return "❌ 工具 " + toolName + " 执行失败: " + (e.getCause() != null ? e.getCause().getMessage() : e.getMessage());
         }
     }
 

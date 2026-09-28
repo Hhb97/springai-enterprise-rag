@@ -80,6 +80,29 @@ public class PromptBuilder {
     }
 
     /**
+     * 带引用要求的 RAG 提示词。上下文需按 {@code [编号] (来源: ...)} 排版（见 RagAppService#buildCitedContext）。
+     *
+     * <p>引用的价值不在「好看」：用户能点回原文核对，评测时也能机器检查「答案里的事实是否出自被引用的那块」，
+     * 这是发现幻觉最便宜的手段。
+     */
+    public String buildRagSystemPrompt(String context, boolean requireCitation) {
+        if (!requireCitation) return buildRagSystemPrompt(context);
+        return """
+                %s。
+                请根据以下检索到的上下文内容回答用户的问题。
+                如果上下文中没有相关信息，请直接说"抱歉，我没有找到相关信息"，不要编造答案。
+
+                引用要求：
+                1. 每条来自上下文的事实，在句末用方括号标注来源编号，如 [1]、[2][3]；
+                2. 只能引用下方实际出现的编号，禁止编造编号；
+                3. 上下文没有覆盖的内容不要回答，更不要给它标编号。
+
+                上下文：
+                %s
+                """.formatted(ragRole, context == null ? "" : context);
+    }
+
+    /**
      * 低置信度检索的系统提示词：召回全部低于相似度阈值时使用。
      *
      * <p>和 {@link #buildRagSystemPrompt} 的差别只有一句「不许强行总结」，但这句是关键：

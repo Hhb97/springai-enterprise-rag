@@ -191,7 +191,11 @@ public class SpringAiConversationStore implements ConversationStorePort {
             // RedisChatMemoryRepository.deleteByConversationId()，连带删除 summary 键。
             // 所以必须：clear 前先取出旧摘要 → 清窗口重放剩余消息 → 最后写新摘要。
             // 若先 mergeSummary 再 clear，刚写入的摘要会被立刻删掉（redis 模式摘要失效的根因）。
+            // 【踩过的坑】会话第一次压缩时还没有旧摘要，两种存储都返回 null；原来直接往下传，
+            // mergeSummary 里 prev.isBlank() 抛 NPE 被外层 catch 吞掉 —— 窗口照常裁剪，摘要却永远写不进去，
+            // 表现为「滚动摘要从来没生效过」且日志里只有一行 warn。
             String prev = readSummary(sessionId);
+            if (prev == null) prev = "";
 
             // 定点移除头部 covered 条：clear 后重放剩余消息
             List<Message> remaining = new ArrayList<>(msgs.subList(covered, msgs.size()));

@@ -1212,6 +1212,11 @@
             color: var(--success);
         }
 
+        .tool-btn.voted {
+            color: var(--accent);
+            pointer-events: none;
+        }
+
         .tool-btn svg {
             width: 13.5px;
             height: 13.5px;
@@ -3089,6 +3094,9 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           重新生成
         </button>
+        ${m.streaming ? '' : `
+        <button class="tool-btn ${m.feedback === 'up' ? 'voted' : ''}" onclick="sendFeedback(${idx}, 'up')" title="回答有帮助" ${m.feedback ? 'disabled' : ''}>👍</button>
+        <button class="tool-btn ${m.feedback === 'down' ? 'voted' : ''}" onclick="sendFeedback(${idx}, 'down')" title="回答有问题" ${m.feedback ? 'disabled' : ''}>👎</button>`}
       </div>
     `;
 
@@ -3253,6 +3261,44 @@
             btn.classList.remove('copied');
             btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> 复制';
         }, 1500);
+    }
+
+    /**
+     * 回答反馈：👎 的样本会进入评测候选（GET /api/feedback/eval-candidates），
+     * 人工标注预期答案后补进评测集，线上踩过的坑就不会再踩第二次。
+     */
+    async function sendFeedback(idx, rating) {
+        const chat = getCurrentChat();
+        const m = chat?.messages[idx];
+        if (!m || m.feedback) return;
+        const userIdx = chat.messages.slice(0, idx).findLastIndex(x => x.role === 'user');
+        const question = userIdx >= 0 ? chat.messages[userIdx].content : '';
+        let comment = null;
+        if (rating === 'down') {
+            comment = window.prompt('哪里不对？（可选，例如：数值错了 / 答非所问 / 该拒答却编了答案）', '');
+            if (comment === null) return; // 用户取消
+        }
+        try {
+            const resp = await authFetch('/api/feedback', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    sessionId: chat.id,
+                    question: question,
+                    answer: m.content || '',
+                    rating: rating,
+                    comment: comment,
+                    mode: m.mode || chat.mode || ''
+                })
+            });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            m.feedback = rating;
+            saveChats();
+            renderChat();
+            toast(rating === 'up' ? '感谢反馈' : '已记录，我们会用它改进回答', 'success');
+        } catch (e) {
+            toast('反馈提交失败：' + e.message, 'error');
+        }
     }
 
     function regenerate(idx) {

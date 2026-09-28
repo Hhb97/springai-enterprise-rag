@@ -16,6 +16,7 @@ import com.example.ragassitant.domain.spi.LlmPort.MessageDTO.Role;
 import com.example.ragassitant.domain.spi.ToolRegistryPort;
 import com.example.ragassitant.infrastructure.agent.ToolCatalog;
 import com.example.ragassitant.infrastructure.config.AgentProperties;
+import com.example.ragassitant.infrastructure.resilience.AgentExecutors;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
@@ -25,8 +26,6 @@ import reactor.core.publisher.Flux;
 
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -38,16 +37,12 @@ public class ReActAgentAppService {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SMALL_TALK_FALLBACK =
             "您好！我是基于 ReAct 推理模式的智能运维助手，可以帮您查询设备清单与详情、分析能耗数据，也能基于知识库回答业务问题。请问需要什么帮助？";
-    private static final ExecutorService STREAM_EXECUTOR = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "react-stream-worker");
-        t.setDaemon(true);
-        return t;
-    });
-
     /** 调用方未指定 topK 时的默认值（保持原有取值）。 */
     private static final int DEFAULT_TOP_K = 5;
 
     private final AgentRequestPreparer requestPreparer;
+    /** 有界线程池（改造前是 static 无界 cached pool，见 AgentExecutors）。 */
+    private final AgentExecutors executors;
     private final LlmPort llmPort;
     private final ConversationStorePort conversationStorePort;
     private final ToolRegistryPort toolRegistry;
@@ -71,8 +66,10 @@ public class ReActAgentAppService {
                                  AgentProperties props,
                                  PromptInjectionDetector injectionDetector,
                                  AgentTraceStorePort traceStore,
-                                AgentRequestPreparer requestPreparer) {
+                                AgentRequestPreparer requestPreparer,
+                                AgentExecutors executors) {
         this.requestPreparer = requestPreparer;
+        this.executors = executors;
         this.llmPort = llmPort;
         this.conversationStorePort = conversationStorePort;
         this.toolRegistry = toolRegistry;
@@ -91,7 +88,8 @@ public class ReActAgentAppService {
                                      boolean useRag, boolean enableHybridSearch, Integer customTopK) {
         MDC.put(TraceIdFilter.SESSION_ID_KEY, sessionId == null ? "" : sessionId);
         try {
-            return doChat(question, sessionId, useRag, enableHybridSearch, customTopK);
+            return executors.metrics().timeStage("total", "react",
+                    () -> doChat(question, sessionId, useRag, enableHybridSearch, customTopK));
         } finally {
             MDC.remove(TraceIdFilter.SESSION_ID_KEY);
         }
@@ -109,18 +107,21 @@ public class ReActAgentAppService {
         String sess = sessionId == null ? "" : sessionId;
         StreamChannel channel = StreamChannel.open();
 
-        STREAM_EXECUTOR.submit(() -> {
+        // 有界池：满了抛 RejectedExecutionException → 429（见 GlobalExceptionHandler）
+        executors.stream().submit(AgentExecutors.withMdc(() -> {
             MDC.put(TraceIdFilter.SESSION_ID_KEY, sess);
+            long streamStart = System.currentTimeMillis();
             try {
                 runReActLoopStreamBlocking(channel, question, sess, useRag, enableHybridSearch, customTopK);
             } catch (Throwable t) {
                 log.error("🧠 ReActStream 执行异常", t);
                 channel.emitError(t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage());
             } finally {
+                executors.metrics().recordStage("total", "react_stream", System.currentTimeMillis() - streamStart);
                 MDC.remove(TraceIdFilter.SESSION_ID_KEY);
                 channel.complete();
             }
-        });
+        }));
 
         return channel.flux();
     }
@@ -679,6 +680,11 @@ public class ReActAgentAppService {
     }
 
     private StepDecision parseReActResponse(String llmResponse) {
+        return parseReActResponse(llmResponse, textToolCallParser);
+    }
+
+    /** 静态、包可见：解析路径多（文本工具调用 / 结构化 JSON / 纯文本兜底），单测直接覆盖。 */
+    static StepDecision parseReActResponse(String llmResponse, TextToolCallParser textToolCallParser) {
         if (llmResponse == null || llmResponse.isBlank()) {
             return new StepDecision("", null, true, "模型未返回有效内容");
         }
@@ -728,7 +734,7 @@ public class ReActAgentAppService {
         return new StepDecision("", null, true, AgentTextUtils.cleanupAnswer(llmResponse));
     }
 
-    private Map<String, Object> parseStructuredJson(String text) {
+    private static Map<String, Object> parseStructuredJson(String text) {
         try {
             String cleaned = text.replace("```json", "").replace("```", "").trim();
             int start = cleaned.indexOf('{');
@@ -744,7 +750,7 @@ public class ReActAgentAppService {
         return null;
     }
 
-    private String getString(Map<String, Object> map, String key) {
+    private static String getString(Map<String, Object> map, String key) {
         Object v = map.get(key);
         return v instanceof String s ? s : null;
     }
@@ -776,7 +782,7 @@ public class ReActAgentAppService {
 
 
 
-    private record StepDecision(String thought, ToolCall toolCall, boolean isFinalAnswer, String answer) {}
+    record StepDecision(String thought, ToolCall toolCall, boolean isFinalAnswer, String answer) {}
 
     private record ReActResult(String finalAnswer, List<Map<String, Object>> stepTraces) {}
 }

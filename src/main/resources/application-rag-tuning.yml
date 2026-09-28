@@ -1,0 +1,43 @@
+# =====================================================================
+# RAG / Agent 调优参数（覆盖 application-rag.yml 中的同名项）
+#
+# 调参前先用两个只读接口看清现状，再改这里：
+#   GET /api/rag/chunks?fileName=xxx      看切块结果（块数、平均长度、过短块）
+#   GET /api/rag/retrieval?q=问题&topK=5  看召回明细（向量分 / 混合分 / 是否保底块）
+# 每次改动后跑一次评测（application-eval.yml），用数据而不是感觉判断变好还是变差。
+# =====================================================================
+rag:
+  # 3 → 5：阈值闸门已经在（similarity-threshold），多召回的低分块会被过滤掉，
+  # 放宽 top-k 的风险很小；而 top-k=3 时「答案在第 4 块」的问题会直接答不上来。
+  top-k: ${RAG_TOP_K:5}
+
+  # 1 → 0：保底块本质是「最不差的无关文档」。纯 RAG 链路检索为空时会直接回
+  # 「知识库无相关信息」而不调 LLM —— 这比让模型对着无关文档「低置信度作答」更可控。
+  # 如需恢复旧行为：RAG_MIN_KEEP=1
+  min-keep-chunks: ${RAG_MIN_KEEP:0}
+
+  answer:
+    citation:
+      # 纯 RAG 链路回答时要求在句末标注 [编号]，编号与返回的 sources 顺序一致
+      enabled: ${RAG_CITATION:true}
+
+# =====================================================================
+# 时序数据源
+# =====================================================================
+tsdb:
+  # InfluxDB 不可用时是否用确定性模拟数据兜底。
+  # 默认 false：生产环境数据源故障必须如实报错，而不是悄悄返回假数据。
+  # 本地演示 / 没有 InfluxDB 时设 TSDB_MOCK_WHEN_UNAVAILABLE=true，报告首行会标注「演示数据」。
+  mock-when-unavailable: ${TSDB_MOCK_WHEN_UNAVAILABLE:false}
+  # 按日聚合、日期范围查询所用的时区（设备所在地）
+  timezone: ${TSDB_TIMEZONE:America/Toronto}
+
+# =====================================================================
+# Planner 模型（Plan-then-Execute / Graph 的规划节点）
+# =====================================================================
+agent:
+  planner:
+    # 留空 = 沿用主聊天模型。填写时须是主聊天后端（spring.ai.chat-backend）上可用的模型名，
+    # 失败时自动降级到主模型。
+    model: ${PLANNER_MODEL:}
+    temperature: 0.1

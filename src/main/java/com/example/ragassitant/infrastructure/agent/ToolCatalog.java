@@ -1,9 +1,12 @@
 package com.example.ragassitant.infrastructure.agent;
 
 import com.example.ragassitant.domain.spi.AgentTraceStorePort;
+import com.example.ragassitant.infrastructure.governance.ToolGovernance;
+import com.example.ragassitant.infrastructure.observability.AgentMetrics;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
@@ -40,13 +43,19 @@ public class ToolCatalog {
     private final List<ToolCallback> tracingToolCallbacks;
 
     public ToolCatalog(DeviceTools deviceTools, AgentTraceStorePort traceStore) {
+        this(deviceTools, traceStore, ToolGovernance.permissive(), AgentMetrics.noop());
+    }
+
+    @Autowired
+    public ToolCatalog(DeviceTools deviceTools, AgentTraceStorePort traceStore,
+                       ToolGovernance governance, AgentMetrics metrics) {
         this.toolCallbacks = Arrays.asList(
                 MethodToolCallbackProvider.builder()
                         .toolObjects(deviceTools)
                         .build()
                         .getToolCallbacks());
         this.tracingToolCallbacks = toolCallbacks.stream()
-                .map(cb -> (ToolCallback) new TracingToolCallback(cb, traceStore))
+                .map(cb -> (ToolCallback) new TracingToolCallback(cb, traceStore, governance, metrics))
                 .toList();
     }
 

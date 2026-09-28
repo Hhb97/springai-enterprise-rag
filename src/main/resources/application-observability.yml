@@ -1,0 +1,38 @@
+# ============================================================
+# 可观测性：Agent 指标 / 决策链路（trace）写入与保留
+# 对应代码：infrastructure.observability.*、JpaAgentTraceStoreAdapter
+#
+# 指标查看：GET /actuator/metrics/<name>，常用：
+#   agent.stage.duration      各阶段耗时（stage=rewrite/retrieval/planner/tool/solver/total, mode=agent/react/plan/graph/rag）
+#   agent.llm.calls           LLM 调用结果（port=primary/rewrite, outcome=success/failure/fallback/rejected）
+#   agent.llm.tokens          token 用量（model, type=prompt/completion）
+#   agent.tool.calls          工具调用（tool, source=native/registry, outcome=ok/error/denied/pending_approval）
+#   agent.fallback.triggered  兜底触发（kind=text_tool_call/meaningless_answer/llm_fallback）
+#   agent.answer.refusal      拒答次数；agent.retrieval.empty 检索空结果
+#   agent.request.rejected    请求被拒（reason=rate_limited/pool_full）
+#   agent.feedback            用户反馈（rating=up/down）
+#
+# 注：接 Prometheus/Grafana 需要 micrometer-registry-prometheus（本地离线仓库缺少与 Boot 4 匹配的版本，
+#     能联网时在 pom 加上即可，指标名无需改动）。
+# ============================================================
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        agent.stage.duration: false
+
+observability:
+  trace:
+    # 异步批量写入：请求线程只入队，不再同步 INSERT
+    async: ${TRACE_ASYNC:true}
+    queue-capacity: 10000
+    batch-size: 50
+    flush-interval-ms: 200
+    # 保留天数，0 = 不清理
+    retention-days: ${TRACE_RETENTION_DAYS:30}
+    cleanup-cron: "0 30 3 * * *"

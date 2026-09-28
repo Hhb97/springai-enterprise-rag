@@ -2,6 +2,10 @@ package com.example.ragassitant.infrastructure.config;
 
 import com.example.ragassitant.domain.spi.LlmPort;
 import com.example.ragassitant.infrastructure.llm.SpringAiChatAdapter;
+import com.example.ragassitant.infrastructure.observability.AgentMetrics;
+import com.example.ragassitant.infrastructure.resilience.CircuitBreaker;
+import com.example.ragassitant.infrastructure.resilience.ResilienceProperties;
+import com.example.ragassitant.infrastructure.resilience.ResilientLlmPort;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -103,6 +107,41 @@ public class LlmBackendConfig {
     // TracingToolCallback + ToolCallBudget 在装饰器层真正强制执行，见 infrastructure.agent 包。
 
     /**
+     * 业务层注入的主 LlmPort：主后端 + 熔断 + 降级到另一个后端（dashscope ↔ ollama）。
+     *
+     * <p>改造前 {@code SpringAiChatAdapter} 直接以 {@code @Primary} 注册，没有熔断也没有降级；
+     * 而项目里其实同时配着两个后端，降级链路是现成的，只是没接上。
+     */
+    @Bean
+    @Primary
+    public LlmPort primaryLlmPort(
+            ChatClient.Builder primaryChatClientBuilder,
+            @Autowired(required = false) @Qualifier("ollamaChatModel") ChatModel ollamaChatModel,
+            @Autowired(required = false) @Qualifier("openAiChatModel") ChatModel openAiChatModel,
+            ResilienceProperties resilienceProperties,
+            AgentMetrics metrics) {
+
+        String backend = (chatBackend == null ? "" : chatBackend.trim().toLowerCase());
+        boolean primaryIsCloud = ("dashscope".equals(backend) || "openai".equals(backend)) && openAiChatModel != null;
+        ChatModel fallbackModel = primaryIsCloud ? ollamaChatModel : openAiChatModel;
+
+        ResilienceProperties.Fallback fb = resilienceProperties.getLlm().getFallback();
+        LlmPort fallback = (fb.isEnabled() && fallbackModel != null)
+                ? new SpringAiChatAdapter(ChatClient.builder(fallbackModel), metrics)
+                : null;
+        log.info("🛡️ 主 LlmPort：主后端={}，降级后端={}，工具调用链路降级={}",
+                primaryIsCloud ? "dashscope" : "ollama",
+                fallback == null ? "无" : (primaryIsCloud ? "ollama" : "dashscope"),
+                fb.isForToolCalling());
+
+        return new ResilientLlmPort("primary",
+                new SpringAiChatAdapter(primaryChatClientBuilder, metrics),
+                fallback, fb.isForToolCalling(),
+                new CircuitBreaker("primary", resilienceProperties.getLlm().getCircuitBreaker()),
+                metrics);
+    }
+
+    /**
      * Query 改写专用的 LlmPort，后端由 {@code rag.query-rewrite.backend} 独立指定。
      *
      * <p>为什么要独立配置：指代消解对 1.5b 级别的小模型偏吃力，改写跑偏反而会让检索更差；
@@ -117,7 +156,9 @@ public class LlmBackendConfig {
             @Value("${rag.query-rewrite.model:}") String rewriteModel,
             @Autowired(required = false) @Qualifier("ollamaChatModel") ChatModel ollamaChatModel,
             @Autowired(required = false) @Qualifier("openAiChatModel") ChatModel openAiChatModel,
-            ChatModel primaryChatModel) {
+            ChatModel primaryChatModel,
+            ResilienceProperties resilienceProperties,
+            AgentMetrics metrics) {
 
         String backend = (rewriteBackend == null ? "" : rewriteBackend.trim().toLowerCase());
         ChatModel chosen;
@@ -157,7 +198,43 @@ public class LlmBackendConfig {
         } else {
             log.info("ℹ️ Query 改写沿用后端默认模型（未指定 rag.query-rewrite.model）");
         }
-        return new SpringAiChatAdapter(builder);
+        // 改写/影子路由/摘要都是辅助调用：独立熔断器（不和主链路共享失败率），不降级 —— 调用方本身都有「失败就跳过」的兜底
+        return new ResilientLlmPort("rewrite", new SpringAiChatAdapter(builder, metrics), null, false,
+                new CircuitBreaker("rewrite", resilienceProperties.getLlm().getCircuitBreaker()), metrics);
+    }
+
+    /**
+     * Planner 专用 LlmPort（Plan-then-Execute / Graph 的规划节点）。
+     *
+     * <p>{@code agent.planner.model} 为空时直接复用主 LlmPort（默认行为不变）；
+     * 配置后在<b>主聊天后端</b>上换用该模型（模型名跟后端绑定，不支持跨后端），
+     * 并以主 LlmPort 作为降级 —— 规划模型挂了照样能用主模型规划。
+     */
+    @Bean("plannerLlmPort")
+    public LlmPort plannerLlmPort(
+            @Value("${agent.planner.model:}") String plannerModel,
+            @Value("${agent.planner.temperature:0.1}") double plannerTemperature,
+            ChatModel primaryChatModel,
+            LlmPort primaryLlmPort,
+            ResilienceProperties resilienceProperties,
+            AgentMetrics metrics) {
+        if (plannerModel == null || plannerModel.isBlank()) {
+            log.info("ℹ️ Planner 沿用主 LlmPort（未配置 agent.planner.model）");
+            return primaryLlmPort;
+        }
+        String backend = (chatBackend == null ? "" : chatBackend.trim().toLowerCase());
+        ChatClient.Builder builder = ChatClient.builder(primaryChatModel);
+        if ("dashscope".equals(backend) || "openai".equals(backend)) {
+            builder = builder.defaultOptions(OpenAiChatOptions.builder()
+                    .model(plannerModel).temperature(plannerTemperature));
+        } else {
+            builder = builder.defaultOptions(OllamaChatOptions.builder()
+                    .model(plannerModel).temperature(plannerTemperature));
+        }
+        log.info("✅ Planner 模型：{}（后端 {}），降级到主 LlmPort", plannerModel, backend);
+        return new ResilientLlmPort("planner", new SpringAiChatAdapter(builder, metrics),
+                primaryLlmPort, false,
+                new CircuitBreaker("planner", resilienceProperties.getLlm().getCircuitBreaker()), metrics);
     }
 
     /**

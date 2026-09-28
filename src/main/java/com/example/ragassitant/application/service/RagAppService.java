@@ -1,5 +1,6 @@
 package com.example.ragassitant.application.service;
 
+import com.example.ragassitant.domain.model.ChunkMetaKeys;
 import com.example.ragassitant.domain.model.DocumentChunk;
 import com.example.ragassitant.domain.model.RagAnswer;
 import com.example.ragassitant.domain.service.HeuristicRouter;
@@ -46,6 +47,42 @@ public class RagAppService {
     private final int minKeepChunks;
 
     private volatile DocumentRetriever documentRetriever;
+
+    /** setter 注入：保持构造器签名不变（单测直接 new 本类），未注入时为 no-op。 */
+    private com.example.ragassitant.infrastructure.observability.AgentMetrics metrics =
+            com.example.ragassitant.infrastructure.observability.AgentMetrics.noop();
+
+    /** 回答是否要求标注来源编号（rag.answer.citation.enabled）。setter 注入，理由同上。 */
+    private boolean citationEnabled = false;
+
+    @Value("${rag.answer.citation.enabled:false}")
+    public void setCitationEnabled(boolean citationEnabled) {
+        this.citationEnabled = citationEnabled;
+    }
+
+    /** 上下文按 {@code [编号] (来源: 文件 > 章节)} 排版，编号与返回给前端的 sources 顺序一致。 */
+    static String buildCitedContext(List<DocumentChunk> docs) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < docs.size(); i++) {
+            DocumentChunk d = docs.get(i);
+            Map<String, Object> meta = d.getMetadata();
+            Object file = meta == null ? null : meta.get(ChunkMetaKeys.FILE_NAME);
+            Object heading = meta == null ? null : meta.get(ChunkMetaKeys.HEADING_PATH);
+            sb.append('[').append(i + 1).append(']');
+            if (file != null || heading != null) {
+                sb.append(" (来源: ").append(file == null ? "" : file);
+                if (heading != null && !String.valueOf(heading).isBlank()) sb.append(" > ").append(heading);
+                sb.append(')');
+            }
+            sb.append('\n').append(d.getText()).append("\n\n");
+        }
+        return sb.toString().trim();
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setMetrics(com.example.ragassitant.infrastructure.observability.AgentMetrics metrics) {
+        if (metrics != null) this.metrics = metrics;
+    }
 
     public RagAppService(LlmPort llmPort,
                          VectorStorePort vectorStorePort,
@@ -207,6 +244,7 @@ public class RagAppService {
                 : vectorSearch(retrievalQuery, effectiveTopK);
 
         log.info("🔵 检索到 {} 个相关文档块", docs.size());
+        metrics.retrievalChunks("rag", docs.size());
         for (int i = 0; i < docs.size(); i++) {
             DocumentChunk doc = docs.get(i);
             String preview = doc.getText().substring(0, Math.min(150, doc.getText().length()));
@@ -217,17 +255,20 @@ public class RagAppService {
         // 直接给确定性回答，同时省掉一次推理延迟。
         if (docs.isEmpty()) {
             log.info("🚧 无任何达标召回，直接返回「知识库无相关信息」，不调用 LLM");
+            metrics.retrievalEmpty("rag");
+            metrics.refusal("rag");
             return finish(sessionId, question, NO_RELEVANT_INFO_ANSWER, List.of(), useHybrid, effectiveTopK);
         }
 
-        String context = docs.stream().map(DocumentChunk::getText)
+        String context = citationEnabled ? buildCitedContext(docs)
+                : docs.stream().map(DocumentChunk::getText)
                 .reduce((a, b) -> a + "\n\n---\n\n" + b).orElse("");
 
         // 全是 min-keep-chunks 的保底块 → 换成「不许强行总结」的低置信度提示词
         boolean lowConfidence = isAllBelowThreshold(docs);
         String systemPrompt = lowConfidence
                 ? promptBuilder.buildRagLowConfidenceSystemPrompt(context)
-                : promptBuilder.buildRagSystemPrompt(context);
+                : promptBuilder.buildRagSystemPrompt(context, citationEnabled);
 
         log.info("📨 LLM 请求入参: 置信度={}", lowConfidence ? "LOW(保底块)" : "NORMAL");
         log.info("   context: {}...", context.substring(0, Math.min(300, context.length())));
@@ -236,6 +277,11 @@ public class RagAppService {
         String answer = llmPort.chat(systemPrompt, question);
 
         long elapsed = System.currentTimeMillis() - start;
+        metrics.recordStage("total", "rag", elapsed);
+        if (answer != null && answer.contains("没有找到") && answer.contains("相关")) {
+            // 检索有结果但模型判定上下文不相关 → 也是一次拒答，和「检索为空」分开看能区分召回问题与排序问题
+            metrics.refusal("rag_llm");
+        }
         log.info("🟢 LLM 返回完成 | 耗时: {}ms", elapsed);
         log.info("🟢 回答: {}", answer);
 

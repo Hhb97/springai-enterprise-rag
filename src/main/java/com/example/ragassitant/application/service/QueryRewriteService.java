@@ -6,6 +6,8 @@ import com.example.ragassitant.domain.spi.AgentTraceStorePort;
 import com.example.ragassitant.domain.spi.LlmPort;
 import com.example.ragassitant.domain.spi.LlmPort.MessageDTO;
 import com.example.ragassitant.domain.spi.LlmPort.MessageDTO.Role;
+import com.example.ragassitant.infrastructure.resilience.AgentExecutors;
+import com.example.ragassitant.infrastructure.resilience.ResilienceProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -51,12 +53,15 @@ public class QueryRewriteService {
     /** 短问句阈值：低于此长度大概率是追问 */
     private static final int SHORT_QUESTION_CHARS = 15;
 
-    /** 守护线程池，仅用于给同步的 LLM 调用套超时；不阻塞 JVM 退出 */
-    private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "query-rewrite");
-        t.setDaemon(true);
-        return t;
-    });
+    /**
+     * 仅用于给同步的 LLM 调用套超时。
+     *
+     * <p>改造前是 {@code newCachedThreadPool()}（无界）：超时后 {@code cancel(true)} 只是停止等待，
+     * 底层 HTTP 调用仍在跑、线程并不释放 —— 后端一慢，每个请求都会遗留一条线程，数量无上限。
+     * 现在有界，满了直接拒绝，{@link #rewrite} 的兜底会回退原问题（改写本就是可选环节）。
+     */
+    private final ExecutorService executor = AgentExecutors.build("query-rewrite",
+            new ResilienceProperties.Pool(2, 16, 16), new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
 
     private final LlmPort rewriteLlmPort;
     private final PromptBuilder promptBuilder;

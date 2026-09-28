@@ -7,6 +7,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -34,7 +35,7 @@ import java.util.Map;
  *   <li>登录页面：{@code /agent-trace.html}</li>
  *   <li>登录接口：{@code /api/auth/login}</li>
  *   <li>静态资源：{@code /.static/}</li>
- *   <li>H2 控制台：{@code /h2-console}</li>
+ *   <li>（H2 控制台已移出白名单：它能直接读写整库，必须登录；且默认关闭，见 application-security.yml）</li>
  * </ul>
  */
 @Slf4j
@@ -46,6 +47,8 @@ public class BasicAuthFilter implements Filter {
     private static final String AUTH_HEADER = "Authorization";
     private static final String BASIC_PREFIX = "Basic ";
     private static final String SESSION_USER_KEY = "authenticated_user";
+    /** 当前登录用户在 MDC 中的键；认证关闭时为 {@code anonymous}。 */
+    public static final String MDC_USER_KEY = "user";
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -62,7 +65,7 @@ public class BasicAuthFilter implements Filter {
 
         // 如果认证未启用，直接放行
         if (!authProperties.isEnabled()) {
-            chain.doFilter(request, response);
+            proceed(chain, request, response, "anonymous");
             return;
         }
 
@@ -75,7 +78,7 @@ public class BasicAuthFilter implements Filter {
         // 检查 session 中是否已有认证信息
         var session = req.getSession(false);
         if (session != null && session.getAttribute(SESSION_USER_KEY) != null) {
-            chain.doFilter(request, response);
+            proceed(chain, request, response, String.valueOf(session.getAttribute(SESSION_USER_KEY)));
             return;
         }
 
@@ -110,7 +113,7 @@ public class BasicAuthFilter implements Filter {
                     }
                     session.setAttribute(SESSION_USER_KEY, username);
                     log.info("🔐 用户登录成功（通过 Header）: {}", username);
-                    chain.doFilter(request, response);
+                    proceed(chain, request, response, username);
                     return;
                 } else {
                     log.warn("🔐 登录失败，用户名或密码错误: {}", username);
@@ -120,6 +123,20 @@ public class BasicAuthFilter implements Filter {
 
         // 认证失败，返回 401
         sendUnauthorized(req, resp, "Authentication required");
+    }
+
+    /**
+     * 放行并把当前用户写入 MDC（键 {@link #MDC_USER_KEY}），工具治理据此做权限判断与审计署名。
+     * 请求结束必须移除：Tomcat 线程是复用的，不清理会把上一个人的身份带给下一个请求。
+     */
+    private void proceed(FilterChain chain, ServletRequest request, ServletResponse response, String user)
+            throws IOException, ServletException {
+        MDC.put(MDC_USER_KEY, user);
+        try {
+            chain.doFilter(request, response);
+        } finally {
+            MDC.remove(MDC_USER_KEY);
+        }
     }
 
     /**
@@ -133,7 +150,6 @@ public class BasicAuthFilter implements Filter {
                 || path.equals("/api/auth/login")
                 || path.equals("/api/auth/status")
                 || path.startsWith("/.static/")
-                || path.startsWith("/h2-console")
                 || path.equals("/favicon.ico");
     }
 

@@ -73,7 +73,9 @@ public class AgentTraceJpaEntity {
 
     @PrePersist
     protected void onCreate() {
-        createdAt = LocalDateTime.now();
+        // 异步批量写入时，createdAt 在事件发生时就已设置；只有没设置时才用落库时间，
+        // 否则同一请求内各阶段的先后顺序会被批量写入的时间抹平
+        if (createdAt == null) createdAt = LocalDateTime.now();
         if (status == null) status = "OK";
     }
 }

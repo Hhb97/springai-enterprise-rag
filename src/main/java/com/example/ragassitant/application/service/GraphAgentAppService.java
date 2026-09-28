@@ -25,6 +25,7 @@ import com.example.ragassitant.domain.spi.LlmPort.MessageDTO.Role;
 import com.example.ragassitant.domain.spi.ToolRegistryPort;
 import com.example.ragassitant.infrastructure.agent.ToolCatalog;
 import com.example.ragassitant.infrastructure.config.AgentProperties;
+import com.example.ragassitant.infrastructure.resilience.AgentExecutors;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,8 +43,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -90,21 +89,8 @@ public class GraphAgentAppService {
     static final String K_ANSWER = "answer";
     static final String K_SESSION_ID = "session_id";
 
-    /** 波内并行执行工具的线程池（对齐手写版 PlanThenExecuteAppService 的调度语义）。 */
-    private static final ExecutorService TOOL_EXECUTOR = Executors.newFixedThreadPool(
-            Math.max(2, Runtime.getRuntime().availableProcessors()), r -> {
-                Thread t = new Thread(r, "graph-tool-worker");
-                t.setDaemon(true);
-                return t;
-            });
-
-    /** SSE 流式专用线程池：一个请求一条 worker（与 Plan/ReAct 版同款模式）。 */
-    private static final ExecutorService STREAM_EXECUTOR = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "graph-stream-worker");
-        t.setDaemon(true);
-        return t;
-    });
-
+    /** 有界线程池：SSE worker 用 stream()，波内并行用 tool()（改造前两个都是 static 且无界）。 */
+    private final AgentExecutors executors;
     private final LlmPort llmPort;
     private final ConversationStorePort conversationStorePort;
     private final ToolRegistryPort toolRegistry;
@@ -129,7 +115,9 @@ public class GraphAgentAppService {
                                 AgentTraceStorePort traceStore,
                                 ToolCatalog toolCatalog,
                                 AgentProperties props,
-                                AgentRequestPreparer requestPreparer) {
+                                AgentRequestPreparer requestPreparer,
+                                AgentExecutors executors) {
+        this.executors = executors;
         this.llmPort = llmPort;
         this.conversationStorePort = conversationStorePort;
         this.toolRegistry = toolRegistry;
@@ -205,7 +193,7 @@ public class GraphAgentAppService {
                 String historyText = AgentTextUtils.formatHistory(history, 3);
                 MessageDTO system = new MessageDTO(Role.SYSTEM,
                         promptBuilder.buildPlanSystemPrompt(catalogText, historyText));
-                String raw = llmPort.chatWithRawMessages(List.of(system, new MessageDTO(Role.USER, question)));
+                String raw = callPlanner(List.of(system, new MessageDTO(Role.USER, question)));
                 planJson = raw == null ? "" : raw.trim();
                 plan = parsePlan(planJson);
             } catch (Exception e) {
@@ -272,7 +260,7 @@ public class GraphAgentAppService {
             String sessionId = sessionIdOf(state);
             List<CompletableFuture<Map<String, Object>>> futures = ready.stream()
                     .map(s -> CompletableFuture.supplyAsync(
-                            () -> executeOneStep(s, results, sessionId), TOOL_EXECUTOR))
+                            () -> executeOneStep(s, results, sessionId), executors.tool()))
                     .toList();
 
             for (CompletableFuture<Map<String, Object>> f : futures) {
@@ -365,7 +353,8 @@ public class GraphAgentAppService {
         StreamChannel channel = StreamChannel.open();
         long totalStart = System.currentTimeMillis();
 
-        STREAM_EXECUTOR.submit(() -> {
+        // 有界池：满了抛 RejectedExecutionException → 429（见 GlobalExceptionHandler）
+        executors.stream().submit(AgentExecutors.withMdc(() -> {
             MDC.put(TraceIdFilter.SESSION_ID_KEY, sess);
             try {
                 AgentRequestPreparer.Prepared prep = requestPreparer.prepare(
@@ -405,21 +394,27 @@ public class GraphAgentAppService {
                             log.error("🧭 Graph 执行异常", e);
                             channel.emitError(e.getMessage() == null ? "图执行失败" : e.getMessage());
                         })
+                        // 错误已在 doOnError 里推给前端；这里吞掉，避免 blockLast 再抛一次、外层 catch 重复推 done
+                        .onErrorResume(e -> Flux.empty())
                         .doFinally(sig -> {
                             String answer = answerBuf.toString();
                             saveHistory(sess, question, answer);
                             emitDone(channel, answer, sourcesOf(prep), totalStart, sess);
                         })
-                        .subscribe();
+                        // 阻塞到图执行结束再返回：原来用 subscribe() 立即返回，若图在其它线程上执行，
+                        // 外层 finally 里的 channel.complete() 会先于 done 事件触发，前端收不到最终结果；
+                        // 同时 worker 提前释放，线程池的并发上限也就形同虚设
+                        .blockLast();
             } catch (Throwable t) {
                 log.error("🧭 GraphStream 准备阶段异常", t);
                 channel.emitError(t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage());
                 emitDone(channel, "", List.of(), totalStart, sess);
             } finally {
+                executors.metrics().recordStage("total", "graph_stream", System.currentTimeMillis() - totalStart);
                 MDC.remove(TraceIdFilter.SESSION_ID_KEY);
                 channel.complete();
             }
-        });
+        }));
         return channel.flux();
     }
 
@@ -623,5 +618,31 @@ public class GraphAgentAppService {
         trace.put("durationMs", durationMs);
         trace.put("status", error == null ? "OK" : "ERROR");
         return trace;
+    }
+
+    /**
+     * Planner 专用模型（{@code agent.planner.model}），未配置时就是主 LlmPort。
+     * 规划是「看工具清单挑工具、排依赖」的结构化任务，可以单独换一个更强 / 更便宜的模型而不影响 Solver 的回答风格。
+     * setter 注入：保持构造器签名不变。
+     */
+    private LlmPort plannerLlmPort;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setPlannerLlmPort(@org.springframework.beans.factory.annotation.Qualifier("plannerLlmPort") LlmPort plannerLlmPort) {
+        this.plannerLlmPort = plannerLlmPort;
+    }
+
+    /**
+     * 调 Planner：走 {@code chatStructured}，由 {@code PlanResult} 生成的 JSON Schema 约束输出格式；
+     * 解析仍用本类更宽容的 parsePlan(raw)，结构化结果只用于统计格式遵从率。
+     */
+    private String callPlanner(List<MessageDTO> messages) {
+        LlmPort port = plannerLlmPort != null ? plannerLlmPort : llmPort;
+        LlmPort.Structured<com.example.ragassitant.domain.model.PlanResult> r =
+                port.chatStructured(messages, com.example.ragassitant.domain.model.PlanResult.class);
+        if (!r.parsed() && r.raw() != null && !r.raw().isBlank()) {
+            log.info("📋 Planner 输出未通过 schema 解析，交给宽容解析兜底");
+        }
+        return r.raw();
     }
 }

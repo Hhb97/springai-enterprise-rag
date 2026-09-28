@@ -4,6 +4,7 @@ import com.example.ragassitant.domain.model.DocumentChunk;
 import com.example.ragassitant.domain.service.PromptInjectionDetector;
 import com.example.ragassitant.domain.spi.AgentTraceStorePort;
 import com.example.ragassitant.domain.spi.ConversationStorePort;
+import com.example.ragassitant.infrastructure.observability.AgentMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -40,17 +41,30 @@ public class AgentRequestPreparer {
     private final RagAppService ragAppService;
     private final PromptInjectionDetector injectionDetector;
     private final AgentTraceStorePort traceStore;
+    private final AgentMetrics metrics;
 
     public AgentRequestPreparer(ConversationStorePort conversationStorePort,
                                 QueryRewriteService queryRewriteService,
                                 RagAppService ragAppService,
                                 PromptInjectionDetector injectionDetector,
                                 AgentTraceStorePort traceStore) {
+        this(conversationStorePort, queryRewriteService, ragAppService, injectionDetector, traceStore,
+                AgentMetrics.noop());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AgentRequestPreparer(ConversationStorePort conversationStorePort,
+                                QueryRewriteService queryRewriteService,
+                                RagAppService ragAppService,
+                                PromptInjectionDetector injectionDetector,
+                                AgentTraceStorePort traceStore,
+                                AgentMetrics metrics) {
         this.conversationStorePort = conversationStorePort;
         this.queryRewriteService = queryRewriteService;
         this.ragAppService = ragAppService;
         this.injectionDetector = injectionDetector;
         this.traceStore = traceStore;
+        this.metrics = metrics;
     }
 
     /** 前置流程的结论：是继续正常处理，还是已被安全策略拦下。 */
@@ -112,7 +126,9 @@ public class AgentRequestPreparer {
         boolean queryRewritten = false;
         String rewrittenQuery = null;
         if (!history.isEmpty() && queryRewriteService.isEnabled()) {
+            long rewriteStart = System.currentTimeMillis();
             List<String> rewrites = queryRewriteService.rewrite(question, history, sessionId);
+            metrics.recordStage("rewrite", modeTag, System.currentTimeMillis() - rewriteStart);
             if (rewrites != null && !rewrites.isEmpty()) {
                 rewrittenQuery = rewrites.get(0);
                 queryRewritten = !rewrittenQuery.equals(question);
@@ -130,7 +146,11 @@ public class AgentRequestPreparer {
         if (useRag) {
             try {
                 int topK = customTopK != null && customTopK > 0 ? customTopK : defaultTopK;
+                long retrievalStart = System.currentTimeMillis();
                 docs = ragAppService.retrieveDocuments(retrievalQuery, enableHybridSearch, topK);
+                metrics.recordStage("retrieval", modeTag, System.currentTimeMillis() - retrievalStart);
+                metrics.retrievalChunks(modeTag, docs.size());
+                if (docs.isEmpty()) metrics.retrievalEmpty(modeTag);
                 for (DocumentChunk doc : docs) {
                     Map<String, Object> source = new HashMap<>();
                     source.put("content", doc.getText());

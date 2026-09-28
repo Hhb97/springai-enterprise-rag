@@ -166,4 +166,43 @@ class TracingToolCallbackTest {
         assertTrue(catalog.tracingToolCallbacks().stream().allMatch(cb -> cb instanceof TracingToolCallback),
                 "注册给 LLM 的回调没有被装饰，NATIVE_TOOL_CALL 判据就失效了");
     }
+    private static TracingToolCallback withDirect(ToolCallback stub, AgentTraceStorePort store) {
+        var props = new com.example.ragassitant.infrastructure.governance.GovernanceProperties();
+        var policy = new com.example.ragassitant.infrastructure.governance.GovernanceProperties.ToolPolicy();
+        policy.setReturnDirect(true);
+        props.getTools().put("list_devices", policy);
+        var governance = new com.example.ragassitant.infrastructure.governance.ToolGovernance(
+                props, null, null, com.example.ragassitant.infrastructure.observability.AgentMetrics.noop(),
+                System::currentTimeMillis);
+        return new TracingToolCallback(stub, store, governance,
+                com.example.ragassitant.infrastructure.observability.AgentMetrics.noop());
+    }
+
+    @Test
+    @DisplayName("governance 配置直出时，metadata 标记 returnDirect，且还原被 JSON 编码的字符串结果")
+    void returnDirectUnquotesStringResult() {
+        String encoded = new com.fasterxml.jackson.databind.ObjectMapper().valueToTree("## 设备清单").toString();
+        TracingToolCallback wrapped = withDirect(new StubCallback(encoded, null), trace);
+
+        assertTrue(wrapped.getToolMetadata().returnDirect());
+        assertEquals("## 设备清单", wrapped.call("{}"));
+    }
+
+    @Test
+    @DisplayName("未配置直出时不改写结果")
+    void noReturnDirectByDefault() {
+        String encoded = "\"abc\"";
+        ToolCallback wrapped = new TracingToolCallback(new StubCallback(encoded, null), trace);
+
+        assertFalse(wrapped.getToolMetadata().returnDirect());
+        assertEquals(encoded, wrapped.call("{}"));
+    }
+
+    @Test
+    @DisplayName("unquote 对非 JSON 字符串原样返回")
+    void unquoteLeavesPlainTextAlone() {
+        assertEquals("plain", TracingToolCallback.unquote("plain"));
+        assertEquals("{\"a\":1}", TracingToolCallback.unquote("{\"a\":1}"));
+        assertNull(TracingToolCallback.unquote(null));
+    }
 }

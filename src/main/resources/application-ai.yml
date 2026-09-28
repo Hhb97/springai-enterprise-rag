@@ -35,21 +35,21 @@ spring:
     # 创建 API Key 后填入，或通过环境变量 DASHSCOPE_API_KEY 注入
     # 安全提醒：不要在 yml 里写死真实 Key，优先用环境变量 .env 注入
     openai:
-      api-key: ${DASHSCOPE_API_KEY:API_KEY}
+      api-key: ${DASHSCOPE_API_KEY:not-configured}
       base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
       # DashScope 聊天模型（任选其一）：
-      #   qwen3.7-plus       通义千问 3.7 Plus（性价比高，推荐）
+      #   qwen3.7-plus-2026-05-26       通义千问 3.7 Plus（性价比高，推荐）
       #   qwen3.7-flash      通义千问 3.7 Flash（速度快，免费额度大）
       #   qwen-plus          通义千问 Plus（稳定版）
       #   qwen-max           通义千问 Max（效果最好）
       #   qwen-turbo         通义千问 Turbo（响应最快）
       #   qwen-vl-plus       多模态
       default-chat-options:
-        model: ${DASHSCOPE_CHAT_MODEL:qwen3.7-plus}
+        model: ${DASHSCOPE_CHAT_MODEL:qwen3.7-plus-2026-05-26}
         temperature: 0.3
       chat:
         options:
-          model: ${DASHSCOPE_CHAT_MODEL:qwen3.7-plus}
+          model: ${DASHSCOPE_CHAT_MODEL:qwen3.7-plus-2026-05-26}
           temperature: 0.3
       # ===== DashScope Embedding 向量编码 =====
       # 当 EMBED_BACKEND=dashscope 时使用（不用本地装 Ollama）

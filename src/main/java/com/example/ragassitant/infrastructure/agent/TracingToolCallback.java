@@ -2,12 +2,16 @@ package com.example.ragassitant.infrastructure.agent;
 
 import com.example.ragassitant.common.trace.TraceIdFilter;
 import com.example.ragassitant.domain.spi.AgentTraceStorePort;
+import com.example.ragassitant.infrastructure.governance.ToolGovernance;
+import com.example.ragassitant.infrastructure.observability.AgentMetrics;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
+import org.springframework.ai.tool.metadata.DefaultToolMetadata;
 import org.springframework.ai.tool.metadata.ToolMetadata;
 
 import java.util.Map;
@@ -31,17 +35,39 @@ import java.util.Map;
  *
  * <p>顺带说明：改用 {@code ChatClient.toolCallbacks(...)} 注册工具（而不是 {@code tools(Object...)}）
  * 也是工具检索（按 query 动态挑 top-K 个工具注册）的前置条件。
+ *
+ * <p>生产化后本类还承担两件事：
+ * <ul>
+ *   <li><b>治理</b>：执行前过 {@link ToolGovernance}（禁用 / 权限 / 高风险待确认 / 写操作幂等 / 审计）；</li>
+ *   <li><b>直出</b>：governance 配置为 returnDirect 的只读工具，通过 {@link #getToolMetadata()} 告诉
+ *       Spring AI 跳过模型总结轮，工具输出原样作为最终回答 —— 省一次 LLM 往返，也杜绝模型「总结」时改数字。</li>
+ * </ul>
  */
 public class TracingToolCallback implements ToolCallback {
 
     private static final Logger log = LoggerFactory.getLogger(TracingToolCallback.class);
 
+    private static final ObjectMapper JSON = new ObjectMapper();
+
     private final ToolCallback delegate;
     private final AgentTraceStorePort traceStore;
+    private final ToolGovernance governance;
+    private final AgentMetrics metrics;
+    private final ToolMetadata metadata;
 
     public TracingToolCallback(ToolCallback delegate, AgentTraceStorePort traceStore) {
+        this(delegate, traceStore, ToolGovernance.permissive(), AgentMetrics.noop());
+    }
+
+    public TracingToolCallback(ToolCallback delegate, AgentTraceStorePort traceStore,
+                               ToolGovernance governance, AgentMetrics metrics) {
         this.delegate = delegate;
         this.traceStore = traceStore;
+        this.governance = governance;
+        this.metrics = metrics;
+        boolean direct = delegate.getToolMetadata().returnDirect()
+                || governance.returnDirect(delegate.getToolDefinition().name());
+        this.metadata = new DefaultToolMetadata(direct);
     }
 
     @Override
@@ -51,7 +77,7 @@ public class TracingToolCallback implements ToolCallback {
 
     @Override
     public ToolMetadata getToolMetadata() {
-        return delegate.getToolMetadata();
+        return metadata;
     }
 
     @Override
@@ -71,7 +97,7 @@ public class TracingToolCallback implements ToolCallback {
         // ToolExecutionExceptionProcessor 转成错误文本回灌给模型，循环不会停。
         if (!ToolCallBudget.tryAcquire()) {
             log.warn("🛠️[NATIVE_TOOL_CALL] 工具调用次数已达上限，中断本轮循环: tool={}", name);
-            throw new IllegalStateException("已达到本次问答的工具调用次数上限 (agent.max-tool-calls)，请缩小问题范围后重试");
+            throw new ToolBudgetExceededException("已达到本次问答的工具调用次数上限 (agent.max-tool-calls)，请缩小问题范围后重试");
         }
         long start = System.currentTimeMillis();
         log.info("🛠️[NATIVE_TOOL_CALL] LLM 通过原生 tool_calls 通道调用 {}，入参={}", name, toolInput);
@@ -79,16 +105,38 @@ public class TracingToolCallback implements ToolCallback {
         String result = null;
         String error = null;
         try {
-            result = invocation.execute();
+            result = governance.execute(name, toolInput, "native", invocation::execute);
+            if (metadata.returnDirect()) {
+                result = unquote(result);
+            }
+            metrics.toolCall(name, "native", "ok");
             return result;
         } catch (Exception e) {
             error = e.toString();
+            metrics.toolCall(name, "native", "error");
             throw e;
         } finally {
             long elapsed = System.currentTimeMillis() - start;
             log.info("🛠️[NATIVE_TOOL_CALL] {} 执行完毕，耗时 {}ms，结果长度={}",
                     name, elapsed, result == null ? 0 : result.length());
             safeRecord(name, toolInput, result, elapsed, error);
+        }
+    }
+
+    /**
+     * Spring AI 的 {@code DefaultToolCallResultConverter} 会把「不是合法 JSON」的字符串结果再 JSON 编码一次
+     * （Markdown 报表 → {@code "\"## 能耗...\n\""}）。交给模型时无所谓，但直出时这串带引号和转义符的文本
+     * 会原样显示给用户，所以直出前还原成原文。
+     */
+    static String unquote(String result) {
+        if (result == null || result.length() < 2 || result.charAt(0) != '"'
+                || result.charAt(result.length() - 1) != '"') {
+            return result;
+        }
+        try {
+            return JSON.readValue(result, String.class);
+        } catch (Exception e) {
+            return result;
         }
     }
 

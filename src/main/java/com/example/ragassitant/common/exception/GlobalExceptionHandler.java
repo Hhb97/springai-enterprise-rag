@@ -28,6 +28,20 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(status).body(ApiResponse.fail(e.getCode(), e.getMessage()));
     }
 
+    /**
+     * 有界线程池已满（{@code AgentExecutors.stream()} 拒绝）→ 429。
+     *
+     * <p>改造前线程池无界，这种情况表现为线程数失控直到 OOM；现在是明确、可重试的「服务繁忙」。
+     * 必须写在 RuntimeException 处理器之前被匹配到（Spring 按异常类型最具体者优先）。
+     */
+    @ExceptionHandler(java.util.concurrent.RejectedExecutionException.class)
+    public ResponseEntity<ApiResponse<Void>> handleRejected(java.util.concurrent.RejectedExecutionException e) {
+        log.warn("🚦 请求被拒绝（线程池已满）: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header("Retry-After", "5")
+                .body(ApiResponse.fail("SERVER_BUSY", "服务繁忙：当前并发问答数已达上限，请稍后重试"));
+    }
+
     @ExceptionHandler(RuntimeException.class)
     public ResponseEntity<ApiResponse<Void>> handleRuntimeException(RuntimeException e) {
         log.error("运行时异常: {}", e.getMessage(), e);

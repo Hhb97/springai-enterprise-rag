@@ -9,6 +9,8 @@ import com.example.ragassitant.domain.spi.LlmPort.MessageDTO.Role;
 import com.example.ragassitant.infrastructure.agent.ToolCatalog;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.ragassitant.infrastructure.resilience.AgentExecutors;
+import com.example.ragassitant.infrastructure.resilience.ResilienceProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -68,12 +70,15 @@ public class ShadowToolRouter {
         UNKNOWN
     }
 
-    /** 守护线程池：影子调用绝不能占用请求线程，也不能拖住 JVM 退出 */
-    private final ExecutorService executor = Executors.newFixedThreadPool(2, r -> {
-        Thread t = new Thread(r, "shadow-route");
-        t.setDaemon(true);
-        return t;
-    });
+    /**
+     * 影子调用线程池。
+     *
+     * <p>改造前是 {@code newFixedThreadPool(2)}：线程数固定但<b>队列无界</b>，
+     * 高峰期影子任务会在内存里无限堆积。现在队列有界、满了丢弃 —— 影子比对是抽样统计，丢一些样本无所谓，
+     * 但绝不能为了它把内存吃光。
+     */
+    private final ExecutorService executor = AgentExecutors.build("shadow-route",
+            new ResilienceProperties.Pool(2, 2, 64), new java.util.concurrent.ThreadPoolExecutor.DiscardPolicy());
 
     private final AtomicLong counter = new AtomicLong();
 

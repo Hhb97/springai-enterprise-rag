@@ -16,6 +16,7 @@ import com.example.ragassitant.domain.spi.LlmPort.MessageDTO.Role;
 import com.example.ragassitant.domain.spi.ToolRegistryPort;
 import com.example.ragassitant.infrastructure.agent.ToolCatalog;
 import com.example.ragassitant.infrastructure.config.AgentProperties;
+import com.example.ragassitant.infrastructure.resilience.AgentExecutors;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,8 +36,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -71,20 +70,6 @@ public class PlanThenExecuteAppService {
     private static final String SMALL_TALK_FALLBACK =
             "您好！我是基于 Plan-then-Execute 规划模式的智能运维助手，可以帮您查询设备清单与详情、分析能耗数据，也能基于知识库回答业务问题。请问需要什么帮助？";
 
-    /** Executor 并行池：上限 4，daemon 线程不阻塞 JVM 退出。 */
-    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4, r -> {
-        Thread t = new Thread(r, "plan-exec-worker");
-        t.setDaemon(true);
-        return t;
-    });
-
-    /** SSE 流式专用线程池：一个请求一条 worker，daemon 不阻塞 JVM 退出。 */
-    private static final ExecutorService STREAM_EXECUTOR = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "plan-stream-worker");
-        t.setDaemon(true);
-        return t;
-    });
-
     private static final int MAX_PLAN_STEPS = 5;
     private static final int ARG_REF_MAX_LEN = 2000;
 
@@ -98,6 +83,11 @@ public class PlanThenExecuteAppService {
     private final ToolCatalog toolCatalog;
     private final PromptInjectionDetector injectionDetector;
     private final AgentProperties props;
+    /**
+     * 有界线程池。改造前是两个 static 池：工具并行用 {@code newFixedThreadPool(4)}（队列无界），
+     * SSE worker 用 {@code newCachedThreadPool()}（线程数无界）。见 AgentExecutors。
+     */
+    private final AgentExecutors executors;
 
     public PlanThenExecuteAppService(LlmPort llmPort,
                                      ConversationStorePort conversationStorePort,
@@ -109,8 +99,10 @@ public class PlanThenExecuteAppService {
                                      ToolCatalog toolCatalog,
                                      PromptInjectionDetector injectionDetector,
                                      AgentProperties props,
-                                     AgentRequestPreparer requestPreparer) {
+                                     AgentRequestPreparer requestPreparer,
+                                     AgentExecutors executors) {
         this.requestPreparer = requestPreparer;
+        this.executors = executors;
         this.llmPort = llmPort;
         this.conversationStorePort = conversationStorePort;
         this.toolRegistry = toolRegistry;
@@ -128,7 +120,8 @@ public class PlanThenExecuteAppService {
                                     boolean useRag, boolean enableHybridSearch, Integer customTopK) {
         MDC.put(TraceIdFilter.SESSION_ID_KEY, sessionId == null ? "" : sessionId);
         try {
-            return doChat(question, sessionId, useRag, enableHybridSearch, customTopK);
+            return executors.metrics().timeStage("total", "plan",
+                    () -> doChat(question, sessionId, useRag, enableHybridSearch, customTopK));
         } finally {
             MDC.remove(TraceIdFilter.SESSION_ID_KEY);
         }
@@ -167,7 +160,7 @@ public class PlanThenExecuteAppService {
         String planJson = null;
         String planError = null;
         try {
-            String raw = llmPort.chatWithRawMessages(buildPlannerMessages(question, history));
+            String raw = callPlanner(buildPlannerMessages(question, history));
             planJson = raw == null ? "" : raw.trim();
             plan = parsePlan(planJson, sessionId);
         } catch (Exception e) {
@@ -233,18 +226,21 @@ public class PlanThenExecuteAppService {
         String sess = sessionId == null ? "" : sessionId;
         StreamChannel channel = StreamChannel.open();
 
-        STREAM_EXECUTOR.submit(() -> {
+        // 有界池：满了抛 RejectedExecutionException → 429（见 GlobalExceptionHandler）
+        executors.stream().submit(AgentExecutors.withMdc(() -> {
             MDC.put(TraceIdFilter.SESSION_ID_KEY, sess);
+            long streamStart = System.currentTimeMillis();
             try {
                 runPlanStreamBlocking(channel, question, sess, useRag, enableHybridSearch, customTopK);
             } catch (Throwable t) {
                 log.error("📋 PlanStream 执行异常", t);
                 channel.emitError(t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage());
             } finally {
+                executors.metrics().recordStage("total", "plan_stream", System.currentTimeMillis() - streamStart);
                 MDC.remove(TraceIdFilter.SESSION_ID_KEY);
                 channel.complete();
             }
-        });
+        }));
 
         return channel.flux();
     }
@@ -292,7 +288,7 @@ public class PlanThenExecuteAppService {
         String planJson = null;
         String planError = null;
         try {
-            String raw = llmPort.chatWithRawMessages(buildPlannerMessages(question, history));
+            String raw = callPlanner(buildPlannerMessages(question, history));
             planJson = raw == null ? "" : raw.trim();
             plan = parsePlan(planJson, sessionId);
         } catch (Exception e) {
@@ -354,7 +350,7 @@ public class PlanThenExecuteAppService {
     /**
      * 流式版 Executor：与 {@link #executePlan} 相同的拓扑调度，额外在每步的
      * 关键节点推 SSE 事件，让前端能看到「计划步骤 → 调用工具中 → 观察结果」的完整过程。
-     * <p>事件在 worker 主线程（串行）发出，天然有序；工具并行执行只在 {@link #EXECUTOR} 内。
+     * <p>事件在 worker 主线程（串行）发出，天然有序；工具并行执行只在 {@code executors.tool()} 内。
      */
     private List<Map<String, Object>> executePlanStream(List<PlanStep> plan, String sessionId,
                                                         StreamChannel ch) {
@@ -404,7 +400,7 @@ public class PlanThenExecuteAppService {
                                 "step", s.step,
                                 "tool", s.tool,
                                 "arguments", s.arguments == null ? Map.of() : s.arguments));
-                        return CompletableFuture.supplyAsync(() -> executeOne(s, results, sessionId), EXECUTOR);
+                        return CompletableFuture.supplyAsync(() -> executeOne(s, results, sessionId), executors.tool());
                     })
                     .toList();
 
@@ -532,6 +528,32 @@ public class PlanThenExecuteAppService {
 
     // ==================== 阶段一：Planner 解析 ====================
 
+    /**
+     * Planner 专用模型（{@code agent.planner.model}），未配置时就是主 LlmPort。
+     * 规划是「看工具清单挑工具、排依赖」的结构化任务，可以单独换一个更强 / 更便宜的模型而不影响 Solver 的回答风格。
+     * setter 注入：保持构造器签名不变。
+     */
+    private LlmPort plannerLlmPort;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setPlannerLlmPort(@org.springframework.beans.factory.annotation.Qualifier("plannerLlmPort") LlmPort plannerLlmPort) {
+        this.plannerLlmPort = plannerLlmPort;
+    }
+
+    /**
+     * 调 Planner：走 {@code chatStructured}，由 {@code PlanResult} 生成的 JSON Schema 约束输出格式；
+     * 解析仍用本类更宽容的 parsePlan(raw)，结构化结果只用于统计格式遵从率。
+     */
+    private String callPlanner(List<MessageDTO> messages) {
+        LlmPort port = plannerLlmPort != null ? plannerLlmPort : llmPort;
+        LlmPort.Structured<com.example.ragassitant.domain.model.PlanResult> r =
+                port.chatStructured(messages, com.example.ragassitant.domain.model.PlanResult.class);
+        if (!r.parsed() && r.raw() != null && !r.raw().isBlank()) {
+            log.info("📋 Planner 输出未通过 schema 解析，交给宽容解析兜底");
+        }
+        return r.raw();
+    }
+
     private List<MessageDTO> buildPlannerMessages(String question, List<Map.Entry<String, String>> history) {
         String historyText = AgentTextUtils.formatHistory(history, 3);
         String catalogText = toolCatalog.renderForPrompt();
@@ -649,7 +671,7 @@ public class PlanThenExecuteAppService {
 
             // 同一波内无依赖关系，并行执行；墙钟时间 ≈ 最慢那一步
             List<CompletableFuture<Map<String, Object>>> futures = ready.stream()
-                    .map(s -> CompletableFuture.supplyAsync(() -> executeOne(s, results, sessionId), EXECUTOR))
+                    .map(s -> CompletableFuture.supplyAsync(() -> executeOne(s, results, sessionId), executors.tool()))
                     .toList();
             for (CompletableFuture<Map<String, Object>> f : futures) {
                 try {

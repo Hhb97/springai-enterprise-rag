@@ -11,6 +11,13 @@
 #   application-prompt.yml    Prompt 提示词（可热改）
 #   application-auth.yml      登录认证：开关 + 用户名密码
 #   application-websearch.yml 网页搜索工具：Tavily / SerpAPI API Key
+#   ---- 生产化加固（feat/agent-production-hardening）----
+#   application-resilience.yml    线程池边界 / 限流 / LLM 超时·重试·熔断·降级
+#   application-security.yml      H2 控制台、SQL 日志、启动安全检查
+#   application-observability.yml 指标、trace 异步写入与保留策略
+#   application-rag-tuning.yml    RAG 召回参数调优、答案溯源、数据源正确性
+#   application-governance.yml    工具风险分级 / 权限 / 人工确认 / 幂等 / 工具检索 / 直出
+#   application-eval.yml          评测集路径、评测门禁阈值
 #
 # 注：spring.profiles.active 多环境（dev/test/prod）可与 include 叠加，
 #     如 spring.profiles.active=prod 会额外加载 application-prod.yml
@@ -31,3 +38,9 @@ spring:
       - prompt        # application-prompt.yml
       - auth          # application-auth.yml
       - websearch     # application-websearch.yml
+      - resilience    # application-resilience.yml
+      - security      # application-security.yml
+      - observability # application-observability.yml
+      - rag-tuning    # application-rag-tuning.yml
+      - governance    # application-governance.yml
+      - eval          # application-eval.yml

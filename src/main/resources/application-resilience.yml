@@ -1,0 +1,74 @@
+# ============================================================
+# 韧性：线程池边界 / 限流 / LLM 超时·重试·熔断·降级
+# 对应代码：infrastructure.resilience.*、common.filter.RateLimitFilter
+#
+# 分层原则：超时、重试、熔断各在一层做，绝不叠加（叠加会让重试次数相乘）
+#   HTTP 超时  → spring.http.clients / reactiveclient（底层客户端真正断开连接）
+#   重试       → spring.ai.retry（Spring AI 自带，仅对瞬时错误）
+#   熔断/降级  → resilience.llm（ResilientLlmPort）
+# ============================================================
+
+spring:
+  http:
+    clients:
+      connect-timeout: ${LLM_CONNECT_TIMEOUT:5s}
+      # 同步调用（含一整轮 Tool Calling）的单次读超时。推理模型单轮实测 ~8s，留足余量
+      read-timeout: ${LLM_READ_TIMEOUT:90s}
+    reactiveclient:
+      connect-timeout: ${LLM_CONNECT_TIMEOUT:5s}
+      # 流式：两个数据块之间的最大间隔，不是整个流的总时长
+      read-timeout: ${LLM_STREAM_IDLE_TIMEOUT:120s}
+
+  ai:
+    retry:
+      # 【必须覆盖】Spring AI 默认 max-attempts=10、初始 2s、倍数 5、无上限：
+      # 后端一故障，单个请求会退避 2s→10s→50s→250s…，比不重试更糟
+      max-attempts: ${LLM_RETRY_MAX_ATTEMPTS:2}
+      on-client-errors: false
+      backoff:
+        initial-interval: 500ms
+        multiplier: 2
+        max-interval: 2s
+
+resilience:
+  executors:
+    # SSE worker：一个流式请求占一条。满了返回 429（不排长队，用户早就放弃等了）
+    stream:
+      core-size: ${AGENT_STREAM_CORE:4}
+      max-size: ${AGENT_STREAM_MAX:32}
+      queue-capacity: ${AGENT_STREAM_QUEUE:16}
+    # 工具并行执行：满了由调用线程自己跑（退化成串行，不失败）
+    tool:
+      core-size: 4
+      max-size: 16
+      queue-capacity: 64
+    # 辅助任务（改写超时控制、影子路由）：满了跳过
+    aux:
+      core-size: 2
+      max-size: 8
+      queue-capacity: 32
+
+  rate-limit:
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    # 单用户（登录名，未登录按 IP）每分钟问答请求数
+    per-user-per-minute: ${RATE_LIMIT_PER_MINUTE:30}
+    # 允许的瞬时突发
+    burst: ${RATE_LIMIT_BURST:10}
+    paths:
+      - /ai/
+      - /api/eval/
+    exclude-paths:
+      - /ai/health
+
+  llm:
+    circuit-breaker:
+      enabled: true
+      window-size: 20
+      minimum-calls: 5
+      failure-rate-threshold: 50
+      open-duration-ms: 30000
+    fallback:
+      # 主后端失败/熔断时降级到另一个后端（dashscope ↔ ollama）
+      enabled: ${LLM_FALLBACK_ENABLED:true}
+      # 工具调用链路默认不降级：本地 1.5b 模型不支持原生 tool calling，降级只会得到文本工具调用的错答
+      for-tool-calling: false

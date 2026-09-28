@@ -36,4 +36,10 @@ public interface AgentTraceJpaRepository extends JpaRepository<AgentTraceJpaEnti
 
     List<AgentTraceJpaEntity> findByStageAndStatusNotInOrderByCreatedAtDesc(
             String stage, List<String> excludedStatuses, Pageable pageable);
+
+    /** 保留策略：删除早于指定时间的记录，返回删除条数。 */
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.transaction.annotation.Transactional
+    @Query("delete from AgentTraceJpaEntity t where t.createdAt < :before")
+    int deleteOlderThan(@Param("before") LocalDateTime before);
 }

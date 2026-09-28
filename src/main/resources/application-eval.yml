@@ -1,0 +1,22 @@
+# =====================================================================
+# 评测（EvalRunner / EvalProperties）
+#
+# 两层评测：
+#   1. 确定性评测（路由层，不调 LLM）：GoldenSetRoutingTest，随 mvn test 每次都跑
+#   2. 在线评测（真实模型）：
+#        POST /api/eval/run?set=golden-v1[&category=knowledge][&limit=10]
+#        或 mvn test -Deval.live=true -Dtest=GoldenSetLiveEvalTest
+#      报告写到 report-dir；满意的一次用 POST /api/eval/baseline?report=<文件名> 设为基线，
+#      之后每次评测自动列出「基线通过、本次失败」的回归用例。
+#
+# 什么时候必须跑在线评测：换模型、改提示词、调 rag.* 参数、改切块、改启发式路由之后。
+# =====================================================================
+eval:
+  golden-set: golden-v1
+  report-dir: ${EVAL_REPORT_DIR:./eval-reports}
+  baseline-file: ${EVAL_BASELINE:./eval-reports/baseline.json}
+  trace-wait-ms: 3000
+  gate:
+    # 在线评测门禁（GoldenSetLiveEvalTest）
+    min-pass-rate: ${EVAL_MIN_PASS_RATE:0.8}
+    max-regressions: ${EVAL_MAX_REGRESSIONS:0}

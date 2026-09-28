@@ -57,7 +57,7 @@ rag:
     # 机械任务也会先思考一轮（实测 reasoning_tokens=145），必然撞上 3s 超时，
     # 而且思维链会混进输出污染改写结果。改写要的是快且不发挥，非推理模型才对。
     # 实测同一 prompt：qwen-turbo 0.47s / qwen-flash 0.69s / qwen-plus 1.10s，均无思考 token。
-    model: ${REWRITE_MODEL:qwen3.7-plus}
+    model: ${REWRITE_MODEL:qwen3.7-plus-2026-05-26}
     # 超时后静默回退原问题，绝不阻断主流程
     timeout-ms: 10000
     # 只喂最近 N 轮，喂太多历史会把改写带偏到旧话题

@@ -5,11 +5,18 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.example.ragassitant.infrastructure.observability.AgentMetrics;
+import com.example.ragassitant.infrastructure.observability.ObservabilityProperties;
+import jakarta.annotation.PreDestroy;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 @Component
 public class JpaAgentTraceStoreAdapter implements AgentTraceStorePort {
@@ -21,10 +28,33 @@ public class JpaAgentTraceStoreAdapter implements AgentTraceStorePort {
     private static final int MIN_SAMPLES_FOR_CONCLUSION = 30;
 
     private final AgentTraceJpaRepository repository;
+    private final ObservabilityProperties.Trace cfg;
+    private final AgentMetrics metrics;
 
-    public JpaAgentTraceStoreAdapter(AgentTraceJpaRepository repository) {
+    /**
+     * 异步写入队列。改造前每条 trace 在请求线程上同步 INSERT，一次问答 3~6 条；
+     * 现在请求线程只负责入队（O(1)），由单个后台线程批量落库。队列满了丢弃并计数，绝不反压请求。
+     */
+    private final BlockingQueue<AgentTraceJpaEntity> queue;
+    private final Thread writer;
+    private volatile boolean running = true;
+
+    public JpaAgentTraceStoreAdapter(AgentTraceJpaRepository repository,
+                                     ObservabilityProperties props,
+                                     AgentMetrics metrics) {
         this.repository = repository;
-        log.info("✅ JpaAgentTraceStoreAdapter 初始化（决策链路持久化）");
+        this.cfg = props.getTrace();
+        this.metrics = metrics;
+        this.queue = new ArrayBlockingQueue<>(Math.max(100, cfg.getQueueCapacity()));
+        if (cfg.isAsync()) {
+            this.writer = new Thread(this::writeLoop, "agent-trace-writer");
+            this.writer.setDaemon(true);
+            this.writer.start();
+        } else {
+            this.writer = null;
+        }
+        log.info("✅ JpaAgentTraceStoreAdapter 初始化（决策链路持久化，异步={}，保留 {} 天）",
+                cfg.isAsync(), cfg.getRetentionDays());
     }
 
     @Override
@@ -49,7 +79,14 @@ public class JpaAgentTraceStoreAdapter implements AgentTraceStorePort {
             e.setDurationMs(durationMs);
             e.setStatus(status);
             e.setErrorMessage(errorMessage);
-            repository.save(e);
+            // 在事件发生时记录时间，保证同一请求内各阶段的先后顺序不被批量写入抹平
+            e.setCreatedAt(LocalDateTime.now());
+            if (writer == null) {
+                repository.save(e);
+            } else if (!queue.offer(e)) {
+                metrics.traceDropped();
+                log.debug("trace 写入队列已满，丢弃一条: stage={}", stage);
+            }
         } catch (Exception ex) {
             log.warn("⚠️ 保存决策链路失败，不影响主流程: {}", ex.getMessage());
         }
@@ -171,5 +208,62 @@ public class JpaAgentTraceStoreAdapter implements AgentTraceStorePort {
     private static String truncate(String s, int max) {
         if (s == null) return null;
         return s.length() > max ? s.substring(0, max) + "...(truncated)" : s;
+    }
+
+    // ==================== 异步写入 / 保留策略 ====================
+
+    private void writeLoop() {
+        List<AgentTraceJpaEntity> batch = new ArrayList<>(cfg.getBatchSize());
+        while (running || !queue.isEmpty()) {
+            try {
+                AgentTraceJpaEntity first = queue.poll(cfg.getFlushIntervalMs(), TimeUnit.MILLISECONDS);
+                if (first == null) continue;
+                batch.add(first);
+                queue.drainTo(batch, Math.max(1, cfg.getBatchSize()) - 1);
+                flush(batch);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception ex) {
+                log.warn("⚠️ trace 批量写入失败（丢弃本批 {} 条）: {}", batch.size(), ex.getMessage());
+            } finally {
+                batch.clear();
+            }
+        }
+    }
+
+    private void flush(List<AgentTraceJpaEntity> batch) {
+        if (!batch.isEmpty()) repository.saveAll(batch);
+    }
+
+    /** 停机时把队列里剩下的写完，避免最后几秒的 trace 丢失。 */
+    @PreDestroy
+    public void shutdown() {
+        running = false;
+        if (writer == null) return;
+        try {
+            writer.join(5_000);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+        List<AgentTraceJpaEntity> rest = new ArrayList<>();
+        queue.drainTo(rest);
+        try {
+            flush(rest);
+        } catch (Exception ex) {
+            log.warn("⚠️ 停机时写入剩余 trace 失败: {}", ex.getMessage());
+        }
+    }
+
+    /** 保留策略：删除超过 retention-days 的记录。 */
+    @Scheduled(cron = "${observability.trace.cleanup-cron:0 30 3 * * *}")
+    public void purgeExpired() {
+        if (cfg.getRetentionDays() <= 0) return;
+        try {
+            int n = repository.deleteOlderThan(LocalDateTime.now().minusDays(cfg.getRetentionDays()));
+            if (n > 0) log.info("🧹 已清理 {} 条超过 {} 天的决策链路记录", n, cfg.getRetentionDays());
+        } catch (Exception ex) {
+            log.warn("⚠️ 清理过期 trace 失败: {}", ex.getMessage());
+        }
     }
 }

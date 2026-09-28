@@ -1,0 +1,62 @@
+# =====================================================================
+# 工具治理（GovernanceProperties / ToolGovernance）
+#
+# 所有工具执行路径（LLM 原生 tool_calls、FORCE_EXEC、Plan / ReAct / Graph）共用这一道闸：
+#   禁用 → 权限(allowed-users) → DANGEROUS 待人工确认 → WRITE 幂等去重 → 执行 → 审计
+#
+# 当前 8 个工具都是只读查询，所以风险相关配置目前只是「预留位」；
+# 新增写类 / 危险类工具时，必须在这里给它标上 risk，否则按 default-risk 处理。
+#
+# 管理接口：
+#   GET  /api/agent/actions?status=PENDING   待确认列表
+#   POST /api/agent/actions/{id}/approve     确认并执行（发起人不能自己确认）
+#   POST /api/agent/actions/{id}/reject      驳回，body: {"reason": "..."}
+#   GET  /api/agent/audit                    最近 100 条工具审计
+# =====================================================================
+governance:
+  # 未配置的工具的默认风险等级。上线写类工具后建议改成 WRITE，做到「默认从严」。
+  default-risk: READ_ONLY
+
+  tools:
+    # 设备清单输出本身就是排版好的表格，直出可省一次 LLM 总结往返
+    list_devices:
+      return-direct: true
+    get_device_detail:
+      return-direct: true
+    # 能耗查询不直出：用户常会在同一句里追问「对比 / 分析一下」，需要模型基于数据继续回答
+    query_energy_by_days:
+      return-direct: false
+    get_weather:
+      # 演示工具，数据为随机生成，生产环境建议禁用
+      enabled: ${GOVERNANCE_WEATHER_ENABLED:true}
+
+    # —— 示例：将来接入写类 / 危险类工具时的配置方式 ——
+    # update_alarm_threshold:
+    #   risk: WRITE
+    #   allowed-users: [admin, ops-lead]
+    # restart_device:
+    #   risk: DANGEROUS
+    #   allowed-users: [admin]
+
+  approval:
+    ttl-minutes: 30
+
+  idempotency:
+    # WRITE 工具：同会话、同参数在窗口内重复调用直接返回上次结果
+    window-seconds: 60
+
+  audit:
+    enabled: true
+    # 只读工具的成功调用默认不写审计（trace 里已有），拦截类事件（拒绝 / 待确认）始终记录
+    include-read-only: false
+
+  direct-output:
+    enabled: ${GOVERNANCE_DIRECT_OUTPUT:true}
+    default-for-read-only: false
+
+  # 工具检索：工具数 >= min-tools 时按问题语义只注册 top-k 个工具（向量库用本地 SimpleVectorStore）
+  tool-retrieval:
+    enabled: false
+    min-tools: 20
+    top-k: 8
+    always-include: [list_devices]

@@ -49,7 +49,7 @@ class PlanThenExecuteAppServiceTest {
                 new NoopLlm(), new NoopConversationStore(), new NoopToolRegistry(),
                 new PromptBuilder(), new NoopTraceStore(), null, null,
                 toolCatalog, new PromptInjectionDetector(), new AgentProperties(),
-                preparer);
+                preparer, com.example.ragassitant.infrastructure.resilience.AgentExecutors.forTest());
     }
 
     // ==================== 桩 ====================

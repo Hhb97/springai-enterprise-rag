@@ -140,6 +140,8 @@ public class DeviceTools {
             List<EnergyRecord> dataPoints = timeSeriesDbPort.queryEnergyByDateRange(sn, start, end);
             String rangeDesc = start.format(DATE_FMT) + " ~ " + end.format(DATE_FMT);
             return formatEnergyResult(device, dataPoints, rangeDesc);
+        } catch (TimeSeriesDbPort.TimeSeriesUnavailableException e) {
+            return sourceUnavailable(e);
         } catch (Exception e) {
             log.error("query_energy_by_date_range 执行失败", e);
             return "❌ 查询能耗失败: " + e.getMessage();
@@ -155,10 +157,29 @@ public class DeviceTools {
             }
             List<EnergyRecord> dataPoints = timeSeriesDbPort.queryEnergyByDays(sn, days);
             return formatEnergyResult(device, dataPoints, timeLabel);
+        } catch (TimeSeriesDbPort.TimeSeriesUnavailableException e) {
+            return sourceUnavailable(e);
         } catch (Exception e) {
             log.error("能耗查询执行失败", e);
             return "❌ 查询能耗失败: " + e.getMessage();
         }
+    }
+
+    /**
+     * 数据源不可用时的统一回复：<b>不给任何数字</b>，并明确告诉模型不要自己编。
+     * 与「查询成功但该时段无数据」严格区分 —— 改造前两者表现一样，查询失败被当成「暂无数据」。
+     */
+    private String sourceUnavailable(Exception e) {
+        log.error("❌ 能耗数据源不可用: {}", e.getMessage());
+        return "❌ 能耗数据源（InfluxDB）当前不可用，无法提供该设备的能耗数据。"
+                + "请如实告知用户数据源故障，不要估算或编造任何数值。";
+    }
+
+    /** 演示模式下每份能耗报告的首行标注，防止模拟值被当成真实数据。 */
+    private String demoBanner() {
+        return timeSeriesDbPort.isDemoData()
+                ? "> ⚠️ **演示数据**：时序数据库未连接，以下数值为模拟值，不代表设备真实能耗。\n\n"
+                : "";
     }
 
     private String formatEnergyResult(Device device, List<EnergyRecord> dataPoints, String timeLabel) {
@@ -176,7 +197,7 @@ public class DeviceTools {
 
         Map<String, Double> monthly = energyAggregator.aggregate(dataPoints, "month");
 
-        StringBuilder sb = new StringBuilder();
+        StringBuilder sb = new StringBuilder(demoBanner());
         sb.append("## 设备能耗报告\n\n");
         sb.append("- **设备名称**: ").append(device.getName()).append("\n");
         sb.append("- **SN 号**: `").append(device.getSn()).append("`\n");
@@ -226,13 +247,22 @@ public class DeviceTools {
         return sb.toString();
     }
 
-    @Tool(name = "aggregate_energy", description = "对已查询到的能耗数据，按指定粒度再次聚合（比如按月、按周、按季度汇总）。" +
-            "注意：如果用户还没查过某设备的能耗数据，必须先调 query_energy_half_year 或 query_energy_by_days 拿每日明细，再用本工具聚合；" +
-            "不能直接调用本工具，否则没有数据源。参数 granularity 只能是：day/week/month/quarter/year，month 是默认值。")
+    /**
+     * 【改造前两个问题】
+     * <ol>
+     *   <li>描述说「必须先查每日明细再调本工具」，实现却自己去查数据 —— 描述与实现矛盾，诱导模型多调一次无用工具；</li>
+     *   <li>硬编码查 180 天：用户问「近 30 天按周聚合」，实际聚合的是 180 天，数字是真的、口径是错的。</li>
+     * </ol>
+     */
+    @Tool(name = "aggregate_energy", description = "按指定粒度（周/月/季度/年）汇总某设备最近 N 天的能耗。" +
+            "本工具会自行查询数据，无需先调用其它能耗工具。" +
+            "例如：近 30 天按周汇总 → days=30, granularity=week；近半年按月 → days=180, granularity=month。")
     public String aggregateEnergy(
-            @ToolParam(description = "设备 SN 号，例如 wzh_device001、mv-003", required = true) String sn,
-            @ToolParam(description = "聚合粒度：day=按天，week=按周，month=按月，quarter=按季度，year=按年，默认 month", required = false) String granularity) {
-        log.info("🔧 调用工具 aggregate_energy, sn={}, granularity={}", sn, granularity);
+            @ToolParam(description = "设备 SN 号，例如 mv-003", required = true) String sn,
+            @ToolParam(description = "聚合粒度：day=按天，week=按周，month=按月，quarter=按季度，year=按年，默认 month", required = false) String granularity,
+            @ToolParam(description = "统计最近多少天，1~730，默认 180（近半年）", required = false) Integer days) {
+        int span = (days == null || days <= 0) ? 180 : Math.min(days, 730);
+        log.info("🔧 调用工具 aggregate_energy, sn={}, granularity={}, days={}", sn, granularity, span);
         String g = granularity == null || granularity.isBlank() ? "month" : granularity.trim().toLowerCase(Locale.ROOT);
 
         Device device = timeSeriesDbPort.findDeviceBySn(sn);
@@ -240,7 +270,12 @@ public class DeviceTools {
             return "❌ 未找到 SN 为 [" + sn + "] 的设备，请先调用 list_devices 确认 SN 是否正确（或按名称搜索）。";
         }
 
-        List<EnergyRecord> dataPoints = timeSeriesDbPort.queryEnergyByDays(device.getSn(), 180);
+        List<EnergyRecord> dataPoints;
+        try {
+            dataPoints = timeSeriesDbPort.queryEnergyByDays(device.getSn(), span);
+        } catch (TimeSeriesDbPort.TimeSeriesUnavailableException e) {
+            return sourceUnavailable(e);
+        }
         if (dataPoints == null || dataPoints.isEmpty()) {
             return "⚠️ 设备 " + device.getName() + "（" + device.getSn() + "）暂无数据，无法按 " + g + " 聚合。";
         }
@@ -249,10 +284,11 @@ public class DeviceTools {
         if (agg.isEmpty()) return "⚠️ 聚合失败。";
 
         double total = agg.values().stream().mapToDouble(Double::doubleValue).sum();
-        StringBuilder sb = new StringBuilder();
+        StringBuilder sb = new StringBuilder(demoBanner());
         sb.append("## 设备能耗").append(gLabel(g)).append("聚合报表\n\n");
         sb.append("- **设备名称**: ").append(device.getName()).append("\n");
         sb.append("- **SN 号**: `").append(device.getSn()).append("`\n");
+        sb.append("- **统计范围**: 最近 ").append(span).append(" 天\n");
         sb.append("- **聚合粒度**: **").append(gLabel(g)).append("**\n");
         sb.append("- **聚合分组**: ").append(agg.size()).append(" 组\n");
         sb.append("- **累计用电量**: **").append(String.format(Locale.ROOT, "%.2f", total)).append(" kWh**\n\n");
@@ -297,8 +333,11 @@ public class DeviceTools {
         ZonedDateTime now = ZonedDateTime.now();
         String timeStr = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH"));
 
+        // 【标注】这是随机生成的占位数据，没有接任何真实天气源。改造前原样返回，
+        // 模型和用户都会把它当成真实天气。接入真实 API 前，输出里必须明示是演示数据。
         return String.format(
-                "【%s】%s 天气：%s，温度：%d°C，湿度：%d%%，风速：%d km/h",
+                "【演示数据·非真实天气】【%s】%s 天气：%s，温度：%d°C，湿度：%d%%，风速：%d km/h。"
+                        + "（该工具尚未接入真实天气服务，回答用户时必须说明这是演示数据）",
                 timeStr, city, condition, temperature, humidity, windSpeed
         );
     }

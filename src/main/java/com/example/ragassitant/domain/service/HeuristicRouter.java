@@ -151,6 +151,18 @@ public class HeuristicRouter {
             Map<String, Object> args = new LinkedHashMap<>();
             args.put("sn", sn);
             args.put("granularity", granularity);
+            // 「近 30 天按周汇总」要把 30 天传下去；原先 aggregate_energy 不接受时间范围、固定查 180 天
+            Matcher daysMatcher = N_DAYS_PATTERN.matcher(question);
+            if (daysMatcher.find()) {
+                try {
+                    int days = Integer.parseInt(daysMatcher.group(1));
+                    if (days > 0 && days <= 730) args.put("days", days);
+                } catch (NumberFormatException ignored) {
+                    // 保持默认范围
+                }
+            } else if (HALF_YEAR_PATTERN.matcher(q).find()) {
+                args.put("days", 180);
+            }
             return new ToolCall("aggregate_energy", args);
         }
 

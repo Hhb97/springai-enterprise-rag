@@ -1,0 +1,22 @@
+# ============================================================
+# 安全加固（覆盖 application-db.yml / application-ai.yml 中的默认值）
+# ============================================================
+
+spring:
+  # H2 控制台默认关闭：它能直接读写整个库（含 agent_traces 里的完整提示词与回答）。
+  # 本地调试需要时 H2_CONSOLE_ENABLED=true，且访问仍需登录（已从 BasicAuthFilter 白名单移除）
+  h2:
+    console:
+      enabled: ${H2_CONSOLE_ENABLED:false}
+
+  # 每条 trace 都会打一大段格式化 SQL，淹没有用日志，且有性能开销
+  jpa:
+    show-sql: ${JPA_SHOW_SQL:false}
+    properties:
+      hibernate:
+        format_sql: false
+
+security:
+  # 启动时检查：使用默认口令 / 缺少 API Key 时打 WARN（不阻断启动，便于本地开发）
+  startup-check:
+    enabled: true

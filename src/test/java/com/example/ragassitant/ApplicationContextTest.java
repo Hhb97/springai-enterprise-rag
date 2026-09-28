@@ -4,7 +4,7 @@ import com.example.ragassitant.application.service.AgentAppService;
 import com.example.ragassitant.application.service.QueryRewriteService;
 import com.example.ragassitant.application.service.RagAppService;
 import com.example.ragassitant.domain.spi.LlmPort;
-import com.example.ragassitant.infrastructure.llm.SpringAiChatAdapter;
+import com.example.ragassitant.infrastructure.resilience.ResilientLlmPort;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -62,7 +62,9 @@ class ApplicationContextTest {
     void twoLlmPortsCoexistWithoutAmbiguity() {
         assertNotNull(primaryLlmPort);
         assertNotNull(rewriteLlmPort);
-        assertInstanceOf(SpringAiChatAdapter.class, primaryLlmPort);
+        // 注入给业务层的必须是带熔断/降级的装饰器，直接拿到裸适配器就绕过了韧性层
+        assertInstanceOf(ResilientLlmPort.class, primaryLlmPort);
+        assertInstanceOf(ResilientLlmPort.class, rewriteLlmPort);
         assertNotSame(primaryLlmPort, rewriteLlmPort,
                 "改写用的应是独立实例，否则 rag.query-rewrite.backend 配置不起作用");
     }

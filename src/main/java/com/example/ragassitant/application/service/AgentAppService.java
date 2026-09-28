@@ -14,6 +14,9 @@ import com.example.ragassitant.domain.spi.LlmPort.MessageDTO;
 import com.example.ragassitant.domain.spi.LlmPort.MessageDTO.Role;
 import com.example.ragassitant.domain.spi.ToolRegistryPort;
 import com.example.ragassitant.infrastructure.agent.ToolCatalog;
+import com.example.ragassitant.infrastructure.agent.ToolRetriever;
+import com.example.ragassitant.infrastructure.governance.ToolGovernance;
+import com.example.ragassitant.infrastructure.observability.AgentMetrics;
 import com.example.ragassitant.infrastructure.config.AgentProperties;
 import com.example.ragassitant.infrastructure.config.AgentProperties.Heuristic.Strategy;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -78,6 +81,10 @@ public class AgentAppService {
      * <p>默认 {@code false} —— 打开会让设备清单/能耗查询能力整体失效，必须是显式选择。
      */
     private final boolean pureKnowledgeMode;
+    private final AgentMetrics metrics;
+    private final ToolGovernance governance;
+    /** 工具数多时按问题挑 top-K 注册；默认未启用，原样返回全部工具。 */
+    private final ToolRetriever toolRetriever;
 
     public AgentAppService(LlmPort llmPort,
                            ConversationStorePort conversationStorePort,
@@ -92,7 +99,10 @@ public class AgentAppService {
                            PromptInjectionDetector injectionDetector,
                            ToolCatalog toolCatalog,
                            AgentProperties props,
-                           @Value("${rag.pure-knowledge-mode:false}") boolean pureKnowledgeMode) {
+                           @Value("${rag.pure-knowledge-mode:false}") boolean pureKnowledgeMode,
+                           AgentMetrics metrics,
+                           ToolGovernance governance,
+                           ToolRetriever toolRetriever) {
         this.llmPort = llmPort;
         this.conversationStorePort = conversationStorePort;
         this.toolRegistry = toolRegistry;
@@ -107,6 +117,9 @@ public class AgentAppService {
         this.toolCatalog = toolCatalog;
         this.props = props;
         this.pureKnowledgeMode = pureKnowledgeMode;
+        this.metrics = metrics;
+        this.governance = governance;
+        this.toolRetriever = toolRetriever;
         log.info("✅ AgentAppService 初始化完成（Spring AI 2.0 原生自动 Tool Calling），纯知识库模式={}", pureKnowledgeMode);
     }
 
@@ -115,7 +128,8 @@ public class AgentAppService {
         // 回调拿不到会话上下文，但它跑在同一个请求线程上，MDC 是最轻的传递方式。
         MDC.put(TraceIdFilter.SESSION_ID_KEY, sessionId == null ? "" : sessionId);
         try {
-            return doChat(question, sessionId, useRag, enableHybridSearch, customTopK);
+            return metrics.timeStage("total", "agent",
+                    () -> doChat(question, sessionId, useRag, enableHybridSearch, customTopK));
         } finally {
             MDC.remove(TraceIdFilter.SESSION_ID_KEY);
         }
@@ -229,6 +243,17 @@ public class AgentAppService {
                 null, null, heuristicHit, strategy,
                 toolMs, toolErr == null ? "OK" : "ERROR", toolErr);
 
+        // 直出：工具输出本身就是排版好的成品（设备清单等），再让模型「总结」一遍既多花一次往返（实测 2~6s），
+        // 又给了它改数字、丢行的机会。只对 governance 显式配置的只读工具生效；工具报错 / 被拦截时仍交给模型解释。
+        if (governance.returnDirect(forcedTool.name) && isUsableToolOutput(forcedResult)) {
+            traceStore.recordDecision(sessionId, 1, "DIRECT_OUTPUT",
+                    forcedTool.name, null, null, null, null, heuristicHit, strategy,
+                    0L, "OK", null);
+            log.info("✅[{}] 工具 {} 配置为直出，跳过 LLM 总结", strategy, forcedTool.name);
+            return finish(sessionId, question, forcedResult, sources, strategy, heuristicHit,
+                    System.currentTimeMillis() - toolStart, "OK", null);
+        }
+
         List<MessageDTO> messages = buildBaseMessages(history);
         messages.add(new MessageDTO(Role.USER, question));
         messages.add(new MessageDTO(Role.ASSISTANT,
@@ -296,7 +321,7 @@ public class AgentAppService {
         String modelOutput = pureKnowledgeMode
                 ? llmPort.chatWithRawMessages(messages)
                 : llmPort.chatWithAutoToolCalling(messages, props.getMaxToolCalls(),
-                        List.copyOf(toolCatalog.tracingToolCallbacks()));
+                        List.copyOf(toolRetriever.select(question)));
         long agentMs = System.currentTimeMillis() - agentStart;
 
         String strategy = pureKnowledgeMode ? "PURE_KNOWLEDGE" : "SPRING_AI_2_AUTO";
@@ -499,6 +524,7 @@ public class AgentAppService {
     private ChatResponse finish(String sessionId, String question, String answer,
                                 List<ChatResponse.SourceDoc> sources, String strategy, boolean heuristicHit,
                                 Long durationMs, String status, String error) {
+        recordOutcomeMetrics(strategy, error);
         traceStore.recordDecision(sessionId, 1, "FINAL",
                 null, null, null,
                 question, answer,
@@ -511,8 +537,20 @@ public class AgentAppService {
         return new ChatResponse(answer, sources);
     }
 
+    /**
+     * 兜底路径的触发频率是模型/提示词健康度最直接的信号：
+     * text_tool_call 上升 = 模型没走原生 tool_calls（换了模型或提示词残留 JSON 指令），
+     * meaningless_answer / model_output_blank 上升 = 模型或后端出问题。
+     */
+    private void recordOutcomeMetrics(String strategy, String error) {
+        if ("TEXT_TOOL_CALL_FALLBACK".equals(strategy)) metrics.fallbackTriggered("text_tool_call");
+        if ("answer_emptied_by_cleanup".equals(error)) metrics.fallbackTriggered("meaningless_answer");
+        if ("model_output_blank".equals(error)) metrics.fallbackTriggered("model_output_blank");
+    }
+
     /** 构建安全拦截拒绝响应。 */
     private ChatResponse buildRejectionResponse(String answer, String type, String attackType, String sessionId) {
+        metrics.rejected(type);
         traceStore.recordDecision(sessionId, 1, "SECURITY_BLOCK",
                 null, null, null,
                 answer, answer,
@@ -540,6 +578,13 @@ public class AgentAppService {
             log.error("❌ LLM 调用失败", e);
             return null;
         }
+    }
+
+    /** 工具返回的是可以直接给用户看的结果，而不是错误 / 拦截提示。 */
+    static boolean isUsableToolOutput(String result) {
+        if (result == null || result.isBlank()) return false;
+        String head = result.stripLeading();
+        return !head.startsWith("❌") && !head.startsWith("⏸");
     }
 
     /** 只剩空白、括号、引号、冒号这类符号 → 是清洗残渣而不是回答。 */

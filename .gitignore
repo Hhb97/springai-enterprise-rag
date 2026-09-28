@@ -30,3 +30,6 @@ uploads/
 *.swp
 cache/
 dist/
+# 评测报告（基线保留入库，便于团队共享同一基线）
+eval-reports/*
+!eval-reports/baseline.json
